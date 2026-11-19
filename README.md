@@ -11,7 +11,7 @@ One repository holds both programs and they are released together under one vers
 | `cmd/infra-agent` | The per-machine agent. Pulls config, reports back, updates itself. | In progress. Not in the tree yet. |
 
 The target design (no SSH, age keys, challenge-response, signed bundles) is written down in
-[docs/design.md](docs/design.md). The hub starts from its current SSH transport; the new transport arrives in later
+[docs/design.md](docs/design.md). Logging, CLI and JSON conventions shared with Rackbook are in [docs/conventions.md](docs/conventions.md). The hub starts from its current SSH transport; the new transport arrives in later
 changes.
 
 This is the code only. Your data (inventory, templates, roles, secrets) stays in your own private repository.
