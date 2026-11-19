@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/netip"
 	"os"
@@ -57,6 +58,11 @@ func WriteNew(path string, key ed25519.PrivateKey) error {
 		os.Remove(path)
 		return err
 	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
 	if err := f.Close(); err != nil {
 		os.Remove(path)
 		return err
@@ -64,16 +70,25 @@ func WriteNew(path string, key ed25519.PrivateKey) error {
 	return nil
 }
 
-// Read reads a PKCS#8 PEM Ed25519 key. A regular file that group or others can read is refused.
+// Read reads a PKCS#8 PEM Ed25519 key. The file is opened once and everything is checked on that handle: it must be
+// a regular file that group and others cannot read.
 func Read(path string) (ed25519.PrivateKey, error) {
-	st, err := os.Stat(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	if st.Mode().IsRegular() && st.Mode().Perm()&0o077 != 0 {
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
 		return nil, fmt.Errorf("%s is readable by others (mode %v); it must be 0600", path, st.Mode().Perm())
 	}
-	data, err := os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(f, 64<<10))
 	if err != nil {
 		return nil, err
 	}

@@ -52,6 +52,9 @@ func TestReadRefusals(t *testing.T) {
 			t.Errorf("%s accepted", name)
 		}
 	}
+	if _, err := Read(dir); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("directory: %v", err)
+	}
 	if _, err := Read(filepath.Join(dir, "missing")); err == nil {
 		t.Error("missing file accepted")
 	}

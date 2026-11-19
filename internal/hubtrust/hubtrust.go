@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 )
 
@@ -57,7 +58,8 @@ func ParsePin(pin string) ([sha256.Size]byte, error) {
 type Verifier struct {
 	// Pins are the accepted pins: one, or several while the hub key is being rotated.
 	Pins []string
-	// Host is the address the agent connects to; it is used only as the TLS server name (SNI), never to decide trust.
+	// Host is the host name the agent connects to, without a port (a port is stripped if given). It is used only as
+	// the TLS server name (SNI), never to decide trust.
 	Host string
 }
 
@@ -97,9 +99,13 @@ func (v Verifier) VerifyChain(raw [][]byte) error {
 // off because it would use the system roots and the host name; VerifyConnection does the verification instead, on
 // every handshake (resumed sessions repeat it as well).
 func (v Verifier) TLSConfig() *tls.Config {
+	host := v.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS13,
-		ServerName:         v.Host,
+		ServerName:         host,
 		InsecureSkipVerify: true, // replaced by VerifyConnection below; the system roots must not decide
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			raw := make([][]byte, len(cs.PeerCertificates))

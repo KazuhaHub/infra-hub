@@ -47,13 +47,16 @@ sha256//AbCdEf...=
 
 ## Give it to the agents
 
+The pin is public and is kept in the inventory, so a token needs no private key:
+
 ```
-infra-hub token --key ./hub.key --hub https://192.0.2.10:8443 --hub https://hub.example.org:8443
+infra-hub token --pin 'sha256//AbCdEf...=' --hub https://192.0.2.10:8443 --hub https://hub.example.org:8443
 ```
 
 prints one line, `ih1.` followed by base64url of `{"v":1,"pins":["sha256//..."],"hubs":["https://...",...]}`. The agent
-install takes it as its argument (`curl ... | sh -s -- <token>`). The token holds no secret: only the public pin and
-the hubs' URLs.
+install takes it as its argument (`curl ... | sh -s -- <token>`). The token holds no secret: only the public pins and
+the hubs' URLs. `--pin` can be repeated, and `--key <path>` can be given as well (its pin is computed, and listed
+first); a pin that is given twice is listed once. Do not decrypt the key just to make a token.
 
 ## Rotating the key
 
@@ -62,10 +65,12 @@ anyone off:
 
 1. `infra-hub key init --out ./hub-new.key`, and store it as above.
 2. **Agents first.** Add the new pin to the agents' pin list (a reviewed change in the infra repository) and wait until
-   every agent has applied it. During this time hubs still use the old key and agents accept both pins.
+   every agent has applied it. During this time hubs still use the old key and agents accept both pins. Tokens for
+   new installs carry both pins during the rotation:
+   `infra-hub token --pin <old pin> --pin <new pin> --hub ...`.
 3. **Then the hubs.** Deploy the new key to every hub's `https.key` path and restart the hubs. Agents accept the new
    pin.
-4. Remove the old pin from the agents and delete the old SOPS file.
+4. Remove the old pin from the agents (and from new tokens) and delete the old SOPS file.
 
 If you switch the hubs before the agents know the new pin, those agents cannot reach any hub until they are given the
 pin by hand.

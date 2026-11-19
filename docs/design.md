@@ -49,8 +49,10 @@ no CA of our own either. It works like an SSH host key:
   It accepts a connection if and only if the leaf certificate's SubjectPublicKeyInfo hash equals one of the pins. It
   ignores the chain, the dates and the host name: the pin is the trust. System roots are never used, so Let's Encrypt,
   DNS or Cloudflare being down does not affect the agents. The verifier is `internal/hubtrust`.
-- `infra-hub token --key K --hub URL...` prints one line for the agent install, `ih1.` plus base64url of
-  `{"v":1,"pins":["sha256//..."],"hubs":["https://host:port",...]}` (`internal/jointoken`). It holds no secret.
+- `infra-hub token --pin PIN --hub URL...` prints one line for the agent install, `ih1.` plus base64url of
+  `{"v":1,"pins":["sha256//..."],"hubs":["https://host:port",...]}` (`internal/jointoken`). It holds no secret, and
+  it takes the public pin from the inventory, so no private key is decrypted to make a token. During a rotation it
+  carries both pins (`--pin OLD --pin NEW`).
 - Rotating: give the agents the new pin first (the list holds both), then switch the hubs to the new key, then drop the
   old pin. No machine is touched by hand.
 

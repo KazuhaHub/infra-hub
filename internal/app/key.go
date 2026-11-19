@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/KazuhaHub/infra-hub/internal/hubkey"
+	"github.com/KazuhaHub/infra-hub/internal/hubtrust"
 	"github.com/KazuhaHub/infra-hub/internal/jointoken"
 )
 
@@ -123,12 +124,15 @@ func pinOfFile(path string) (string, error) {
 
 func (c *cli) newToken() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "token --key <path> --hub <url> [--hub <url>...]",
+		Use:   "token (--pin <pin> | --key <path>) --hub <url> [--hub <url>...]",
 		Short: "Print the one-line token for an agent install",
 		Long: "Prints one line, `ih1.` plus base64url of {\"v\":1,\"pins\":[\"sha256//...\"],\"hubs\":[\"https://host:port\",...]}, to be\n" +
 			"passed to the agent install: curl ... | sh -s -- <token>.\n\n" +
-			"The token holds no secret: only the public pin of the hub identity key and the hubs' URLs. The key file is read\n" +
-			"only to compute the pin.",
+			"The pins come from --pin (repeatable; the public pin from the inventory, so no private key is needed) and\n" +
+			"from --key (its pin is computed; the file is only read). Both may be given. The pin of --key comes first, then\n" +
+			"the --pin values in the order given; a pin that is repeated is listed once. At least one pin is required. During\n" +
+			"a key rotation give both the old and the new pin.\n\n" +
+			"The token holds no secret: only public pins and the hubs' URLs.",
 		Args: usageArgs(cobra.NoArgs),
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			asJSON, err := checkOutput(cmd)
@@ -136,22 +140,49 @@ func (c *cli) newToken() *cobra.Command {
 				return err
 			}
 			path, _ := cmd.Flags().GetString("key")
+			given, _ := cmd.Flags().GetStringArray("pin")
 			hubs, _ := cmd.Flags().GetStringArray("hub")
-			if path == "" || len(hubs) == 0 {
-				return usageErrorf("--key and at least one --hub are required")
+			if path == "" && len(given) == 0 {
+				return usageErrorf("at least one --pin or a --key is required")
 			}
+			if len(hubs) == 0 {
+				return usageErrorf("at least one --hub is required")
+			}
+			seen := map[string]bool{}
 			for i, h := range hubs {
 				h = strings.TrimSuffix(h, "/")
 				if err := jointoken.ValidateHubURL(h); err != nil {
 					return usageErrorf("--hub: %v", err)
 				}
+				if seen[h] {
+					return usageErrorf("--hub: %s twice", h)
+				}
+				seen[h] = true
 				hubs[i] = h
 			}
-			pin, err := pinOfFile(path)
-			if err != nil {
-				return fmt.Errorf("token: %w", err)
+			for _, p := range given {
+				if _, err := hubtrust.ParsePin(p); err != nil {
+					return usageErrorf("--pin %q: %v", p, err)
+				}
 			}
-			pins := []string{pin}
+			var pins []string
+			seen = map[string]bool{}
+			add := func(p string) {
+				if !seen[p] {
+					seen[p] = true
+					pins = append(pins, p)
+				}
+			}
+			if path != "" {
+				pin, err := pinOfFile(path)
+				if err != nil {
+					return fmt.Errorf("token: %w", err)
+				}
+				add(pin)
+			}
+			for _, p := range given {
+				add(p)
+			}
 			tok, err := jointoken.Encode(pins, hubs)
 			if err != nil {
 				return fmt.Errorf("token: %w", err)
@@ -168,7 +199,8 @@ func (c *cli) newToken() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().String("key", "", "the hub identity key file")
+	cmd.Flags().String("key", "", "a hub identity key file (optional; only its pin is used)")
+	cmd.Flags().StringArray("pin", nil, "a public pin, sha256//<base64> (repeatable)")
 	cmd.Flags().StringArray("hub", nil, "a hub's URL, https://host:port (repeatable)")
 	cmd.Flags().StringP("output", "o", "table", "output format: table or json")
 	return cmd

@@ -149,8 +149,8 @@ func TestPinFormat(t *testing.T) {
 	}
 }
 
-// The TLS configuration works in a real handshake: a server with the pinned key is trusted whatever its certificate
-// says about names and dates; another key is not, and TLS 1.2 is not used.
+// The TLS configuration works in a real handshake over TLS 1.3: a server with the pinned key is trusted whatever its
+// certificate says about names and dates; another key is not.
 func TestTLSConfigHandshake(t *testing.T) {
 	key := newKey(t)
 	leaf := certFor(t, key, func(c *x509.Certificate) {
@@ -166,6 +166,9 @@ func TestTLSConfigHandshake(t *testing.T) {
 		cl := &http.Client{Transport: &http.Transport{TLSClientConfig: v.TLSConfig()}, Timeout: 5 * time.Second}
 		resp, err := cl.Get(ts.URL)
 		if err == nil {
+			if resp.TLS == nil || resp.TLS.Version != tls.VersionTLS13 {
+				t.Errorf("negotiated TLS version %v, want 1.3", resp.TLS)
+			}
 			resp.Body.Close()
 		}
 		return err
@@ -173,7 +176,60 @@ func TestTLSConfigHandshake(t *testing.T) {
 	if err := get(Verifier{Pins: []string{keyPin(t, key)}, Host: host}); err != nil {
 		t.Errorf("handshake with the right pin: %v", err)
 	}
+	// A port in Host is stripped for the server name.
+	if err := get(Verifier{Pins: []string{keyPin(t, key)}, Host: net.JoinHostPort(host, "443")}); err != nil {
+		t.Errorf("host with a port: %v", err)
+	}
 	if err := get(Verifier{Pins: []string{keyPin(t, newKey(t))}, Host: host}); err == nil {
 		t.Error("handshake with the wrong pin succeeded")
+	}
+}
+
+// A resumed session skips the certificate exchange; the pins must still be checked, so an agent whose pins changed
+// (the old key retired) does not resume a session with a hub it no longer trusts.
+func TestResumedSessionIsCheckedAgainstTheCurrentPins(t *testing.T) {
+	key := newKey(t)
+	leaf := certFor(t, key, nil)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{{Certificate: [][]byte{leaf.Raw}, PrivateKey: key}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				if tc := c.(*tls.Conn); tc.Handshake() == nil {
+					tc.Write([]byte("x")) // the ticket travels after the handshake; the client reads it
+				}
+			}()
+		}
+	}()
+	cache := tls.NewLRUClientSessionCache(4)
+	dial := func(pin string) (resumed bool, err error) {
+		cfg := Verifier{Pins: []string{pin}}.TLSConfig()
+		cfg.ClientSessionCache = cache
+		conn, err := tls.Dial("tcp", ln.Addr().String(), cfg)
+		if err != nil {
+			return false, err
+		}
+		defer conn.Close()
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		conn.Read(make([]byte, 1))
+		return conn.ConnectionState().DidResume, nil
+	}
+	good := keyPin(t, key)
+	if resumed, err := dial(good); err != nil || resumed {
+		t.Fatalf("first handshake: resumed=%v err=%v", resumed, err)
+	}
+	if resumed, err := dial(good); err != nil || !resumed {
+		t.Fatalf("second handshake with the same pin: resumed=%v err=%v (the test needs a resumable session)", resumed, err)
+	}
+	if _, err := dial(keyPin(t, newKey(t))); err == nil {
+		t.Error("a session was resumed with a hub whose key is no longer pinned")
 	}
 }

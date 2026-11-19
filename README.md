@@ -35,7 +35,7 @@ infra-hub iplist accept <provider>                apply a held IP list update
 infra-hub iplist history <list> [--limit N]       change history of a list (JSON)
 infra-hub key init --out <path>                   generate the hub identity key (once); prints its pin
 infra-hub key pin --key <path>                    print the sha256// pin of a key
-infra-hub token --key <path> --hub <url> [--hub <url>...]
+infra-hub token (--pin <pin>... | --key <path>) --hub <url> [--hub <url>...]
                                                   print the one-line token for an agent install (no secret in it)
 infra-hub version                                 also: infra-hub --version
 ```
@@ -55,9 +55,9 @@ Deprecated, removed in the next release: the old spellings `-config`, `-no-refs`
 snake_case JSON (also available as the hidden `--format legacy`) unless `-o` is given.
 
 - **HTTPS for agents.** With `https.listen` set the hub also serves `GET /v1/healthz`, `POST /v1/challenge` and
-  `POST /v1/report` over TLS 1.3, using a self-signed certificate built from the hub identity key, which agents pin (see [docs/hub-key.md](docs/hub-key.md)). A host
-  proves it holds its age key by decrypting a single-use nonce; its latest report shows up in `status -o json` under
-  `hosts[].report`. SSH is unchanged.
+  `POST /v1/report` over TLS 1.3, using a self-signed certificate built from the hub identity key, which agents pin
+  (see [docs/hub-key.md](docs/hub-key.md)). A host proves it holds its age key by decrypting a single-use nonce; its
+  latest report shows up in `status -o json` under `hosts[].report`. SSH is unchanged.
 
 The config is one JSON file; see `internal/config/config.go` for every field. The HTTPS part (all values are
 examples):
@@ -77,11 +77,12 @@ examples):
 ```
 
 A client is either its SSH public key as a string (the old form) or an object with `sshKey` and an optional
-`agePublicKey` (a host without one gets no challenge). Only age X25519 keys (`age1...`) are supported. `https.key` is the
-hub identity key (Ed25519, PKCS#8 PEM, mode 0600), the same file on every hub. At start the hub builds a self-signed
-certificate from it in memory (names from `httpsAddresses`, valid until 9999-12-31); there are no certificate files and
-nothing to renew. An agent trusts a hub if and only if the key matches its pin (`internal/hubtrust`). The earlier
-`https.cert` and `https.caCert` are gone and make the config fail with an error that names `https.key`.
+`agePublicKey` (a host without one gets no challenge). Only age X25519 keys (`age1...`) are supported. `https.key` is
+the hub identity key (Ed25519, PKCS#8 PEM, mode 0600), the same file on every hub. At start the hub builds a
+self-signed certificate from it in memory (names from `httpsAddresses`, valid until 9999-12-31); there are no
+certificate files and nothing to renew. An agent trusts a hub if and only if the key matches its pin
+(`internal/hubtrust`). The earlier `https.cert` and `https.caCert` are gone; for one release they are ignored with a
+warning that names `https.key`.
 
 ### Config keys are camelCase (migration)
 

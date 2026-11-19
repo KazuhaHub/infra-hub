@@ -166,12 +166,23 @@ func TestConfigClientsAndHTTPS(t *testing.T) {
 			t.Errorf("%s: accepted", name)
 		}
 	}
-	// The old CA fields fail with an error that names the new one.
+	// The old CA fields are ignored with a warning that names the new one; the rest of the config still applies.
 	for _, old := range []string{`"caCert":"/etc/infra-hub/ca.crt"`, `"cert":"/etc/infra-hub/hub.crt"`} {
-		_, err := parse(clients, `,"httpsAddresses":["192.0.2.10"],"https":{"listen":"192.0.2.10:8443","key":"/k",`+old+`}`)
-		if err == nil || !strings.Contains(err.Error(), "https.key") || !strings.Contains(err.Error(), "no longer used") {
-			t.Errorf("%s: %v", old, err)
+		var logs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+		c, err := parse(clients, `,"httpsAddresses":["192.0.2.10"],"https":{"listen":"192.0.2.10:8443","key":"/k",`+old+`}`)
+		slog.SetDefault(prev)
+		if err != nil || c.HTTPS.Key != "/k" || c.HTTPS.Listen != "192.0.2.10:8443" {
+			t.Errorf("%s: %+v %v", old, c.HTTPS, err)
 		}
+		if !strings.Contains(logs.String(), "https.key") || !strings.Contains(logs.String(), "removed config key") {
+			t.Errorf("%s: no warning naming https.key: %q", old, logs.String())
+		}
+	}
+	// Only the old fields, no key: still starts (HTTPS then needs https.key and is refused as before for listen).
+	if _, err := parse(clients, `,"https":{"caCert":"/a","cert":"/b"}`); err != nil {
+		t.Errorf("old fields without listen: %v", err)
 	}
 }
 

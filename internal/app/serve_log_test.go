@@ -27,6 +27,7 @@ import (
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/config"
+	"github.com/KazuhaHub/infra-hub/internal/hubkey"
 	"github.com/KazuhaHub/infra-hub/internal/logx"
 	"github.com/KazuhaHub/infra-hub/internal/testutil"
 )
@@ -188,5 +189,75 @@ func waitFor(t *testing.T, b *syncBuffer, text string) {
 			t.Fatalf("no %q in the log:\n%s", text, b.String())
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// A hub identity key that is missing or readable by others turns HTTPS off, loudly, and leaves SSH up.
+func TestServeWithAnUnusableHTTPSKeyKeepsSSH(t *testing.T) {
+	good, err := hubkey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, setup := range map[string]func(path string){
+		"missing":   func(string) {},
+		"mode 0644": func(p string) { data, _ := hubkey.Marshal(good); os.WriteFile(p, data, 0o644) },
+		"not a key": func(p string) { os.WriteFile(p, []byte("nope"), 0o600) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			signer, clientKey := testutil.NewKey(t)
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := ln.Addr().String()
+			ln.Close()
+			httpsLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			httpsAddr := httpsLn.Addr().String()
+			httpsLn.Close()
+			keyPath := filepath.Join(dir, "hub.key")
+			setup(keyPath)
+			cfgData, _ := json.Marshal(map[string]any{
+				"listen": addr, "repo": filepath.Join(dir, "infra.git"), "upstream": filepath.Join(dir, "no-such-upstream.git"),
+				"hostKey": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": clientKey},
+				"httpsAddresses": []string{"127.0.0.1"}, "https": map[string]any{"listen": httpsAddr, "key": keyPath},
+			})
+			cfg, err := config.ParseConfig(cfgData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logs := &syncBuffer{}
+			logger, err := logx.New(logs, "text", "debug")
+			if err != nil {
+				t.Fatal(err)
+			}
+			prev := slog.Default()
+			logx.Install(logger)
+			t.Cleanup(func() { slog.SetDefault(prev) })
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { serve(ctx, cfg); close(done) }()
+			t.Cleanup(func() { cancel(); <-done })
+
+			waitFor(t, logs, "https is off: cannot use the hub identity key")
+			waitFor(t, logs, "listening")
+			// SSH answers: the owner's key is accepted by the SSH server.
+			c, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "infra", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
+			if err != nil {
+				t.Fatalf("SSH is down: %v", err)
+			}
+			c.Close()
+			// HTTPS is off: nothing listens on its address.
+			if conn, err := net.DialTimeout("tcp", httpsAddr, time.Second); err == nil {
+				conn.Close()
+				t.Error("something listens on the HTTPS address")
+			}
+			if out := logs.String(); strings.Contains(out, "PRIVATE KEY") || strings.Contains(out, "https listening") {
+				t.Errorf("unexpected log content:\n%s", out)
+			}
+		})
 	}
 }

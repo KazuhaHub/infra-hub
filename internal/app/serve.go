@@ -127,10 +127,14 @@ func serve(ctx context.Context, cfg config.Config) error {
 		srv.IPLists = ipm
 	}
 	if cfg.HTTPS.Listen != "" {
-		if key, err := hubkey.Read(cfg.HTTPS.Key); err != nil {
-			slog.Error("https is off: cannot read the hub identity key", "path", cfg.HTTPS.Key, "err", err)
+		key, err := hubkey.Read(cfg.HTTPS.Key)
+		var pin string
+		if err == nil {
+			pin, err = hubkey.Pin(key)
+		}
+		if err != nil {
+			slog.Error("https is off: cannot use the hub identity key", "path", cfg.HTTPS.Key, "err", err)
 		} else {
-			pin, _ := hubkey.Pin(key)
 			slog.Info("https identity", "pin", pin)
 			hs := httpsapi.NewServer(cfg.AgeRecipients(), st)
 			run := &httpsapi.Runner{Key: key, Addresses: cfg.HTTPSAddresses, Listen: cfg.HTTPS.Listen, Server: hs}

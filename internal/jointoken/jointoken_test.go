@@ -25,41 +25,90 @@ func TestEncodeFormatAndRoundTrip(t *testing.T) {
 	if string(raw) != want {
 		t.Errorf("json %s", raw)
 	}
-	got, err := Decode("  " + tok + "\n")
+	got, err := Decode(tok)
 	if err != nil || got.V != 1 || len(got.Pins) != 1 || got.Pins[0] != pin || len(got.Hubs) != 2 || got.Hubs[1] != "https://hub.example.org" {
 		t.Errorf("decode: %+v %v", got, err)
 	}
 }
 
+// padded is the padded base64url form, which has "=" when the length needs it.
+func padded(s string) string { return "ih1." + base64.URLEncoding.EncodeToString([]byte(s)) }
+
 func enc(s string) string { return "ih1." + base64.RawURLEncoding.EncodeToString([]byte(s)) }
 
 func TestDecodeRefusals(t *testing.T) {
 	good := `"pins":["` + pin + `"],"hubs":["https://h.example.org:8443"]`
+	canon := enc(`{"v":1,` + good + `}`)
+	hub := func(h string) string { return enc(`{"v":1,"pins":["` + pin + `"],"hubs":["` + h + `"]}`) }
 	cases := map[string]string{
-		"empty":         "",
-		"no prefix":     strings.TrimPrefix(enc(`{"v":1,`+good+`}`), "ih1."),
-		"other prefix":  "ih2." + strings.TrimPrefix(enc(`{"v":1,`+good+`}`), "ih1."),
-		"padded base64": "ih1." + base64.URLEncoding.EncodeToString([]byte(`{"v":1,`+good+`}x`)),
-		"not base64":    "ih1.!!!",
-		"not json":      enc("hello"),
-		"version 2":     enc(`{"v":2,` + good + `}`),
-		"no version":    enc(`{` + good + `}`),
-		"unknown field": enc(`{"v":1,` + good + `,"secret":"x"}`),
-		"trailing data": enc(`{"v":1,` + good + `}{}`),
-		"no pins":       enc(`{"v":1,"pins":[],"hubs":["https://h:1"]}`),
-		"bad pin":       enc(`{"v":1,"pins":["sha256//x"],"hubs":["https://h:1"]}`),
-		"no hubs":       enc(`{"v":1,"pins":["` + pin + `"],"hubs":[]}`),
-		"http hub":      enc(`{"v":1,"pins":["` + pin + `"],"hubs":["http://h:1"]}`),
-		"hub with path": enc(`{"v":1,"pins":["` + pin + `"],"hubs":["https://h:1/x"]}`),
-		"hub with user": enc(`{"v":1,"pins":["` + pin + `"],"hubs":["https://u:p@h:1"]}`),
-		"hub no host":   enc(`{"v":1,"pins":["` + pin + `"],"hubs":["https://"]}`),
-		"too long":      "ih1." + strings.Repeat("A", 20000),
+		"empty":              "",
+		"no prefix":          strings.TrimPrefix(canon, "ih1."),
+		"other prefix":       "ih2." + strings.TrimPrefix(canon, "ih1."),
+		"unpadded plus =":    canon + "=",
+		"newline":            canon + "\n",
+		"carriage return":    canon + "\r\n",
+		"leading space":      " " + canon,
+		"inner newline":      canon[:20] + "\n" + canon[20:],
+		"not base64":         "ih1.!!!",
+		"not json":           enc("hello"),
+		"version 2":          enc(`{"v":2,` + good + `}`),
+		"no version":         enc(`{` + good + `}`),
+		"unknown field":      enc(`{"v":1,` + good + `,"secret":"x"}`),
+		"trailing data":      enc(`{"v":1,` + good + `}{}`),
+		"trailing garbage":   enc(`{"v":1,` + good + `}x`),
+		"duplicate key":      enc(`{"v":1,"v":1,` + good + `}`),
+		"duplicate pins key": enc(`{"v":1,"pins":["` + pin + `"],` + good + `}`),
+		"case variant":       enc(`{"V":1,` + good + `}`),
+		"case variant 2":     enc(`{"v":1,"Pins":["` + pin + `"],"hubs":["https://h.example.org:8443"]}`),
+		"spaces in json":     enc(`{"v":1, ` + good + `}`),
+		"reordered":          enc(`{"hubs":["https://h.example.org:8443"],"pins":["` + pin + `"],"v":1}`),
+		"no pins":            enc(`{"v":1,"pins":[],"hubs":["https://h:1"]}`),
+		"bad pin":            enc(`{"v":1,"pins":["sha256//x"],"hubs":["https://h:1"]}`),
+		"duplicate pin":      enc(`{"v":1,"pins":["` + pin + `","` + pin + `"],"hubs":["https://h:1"]}`),
+		"no hubs":            enc(`{"v":1,"pins":["` + pin + `"],"hubs":[]}`),
+		"duplicate hub":      enc(`{"v":1,"pins":["` + pin + `"],"hubs":["https://h:1","https://h:1"]}`),
+		"http hub":           hub("http://h:1"),
+		"hub with path":      hub("https://h:1/x"),
+		"trailing slash":     hub("https://h:1/"),
+		"hub with query":     hub("https://h:1?x=1"),
+		"hub with user":      hub("https://u:p@h:1"),
+		"hub no host":        hub("https://"),
+		"empty port":         hub("https://h:"),
+		"port 0":             hub("https://h:0"),
+		"port 65536":         hub("https://h:65536"),
+		"port text":          hub("https://h:abc"),
+		"port leading zero":  hub("https://h:08443"),
+		"too long":           "ih1." + strings.Repeat("A", 20000),
 	}
 	for name, tok := range cases {
 		if _, err := Decode(tok); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
+	for _, h := range []string{"https://h", "https://h:1", "https://h:65535", "https://[2001:db8::1]:8443", "https://192.0.2.1:8443"} {
+		if _, err := Decode(hub(h)); err != nil {
+			t.Errorf("%s: %v", h, err)
+		}
+	}
+}
+
+// A token that is otherwise exactly right is refused when it is in padded base64url.
+func TestPaddedBase64IsRefused(t *testing.T) {
+	for _, port := range []string{"1", "12", "123"} {
+		canon := `{"v":1,"pins":["` + pin + `"],"hubs":["https://h.example.org:` + port + `"]}`
+		p := padded(canon)
+		if !strings.HasSuffix(p, "=") {
+			continue
+		}
+		if _, err := Decode(enc(canon)); err != nil {
+			t.Fatalf("the unpadded form of %s is refused: %v", canon, err)
+		}
+		if _, err := Decode(p); err == nil {
+			t.Errorf("padded form accepted: %s", p)
+		}
+		return
+	}
+	t.Fatal("no padded example found")
 }
 
 func TestEncodeRefusals(t *testing.T) {

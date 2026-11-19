@@ -48,7 +48,7 @@ type Config struct {
 	// Clients maps a host name to how it identifies itself. In the file an entry is either the SSH public key
 	// (authorized_keys format) as a string, as before, or an object {"sshKey": "...", "agePublicKey": "age1..."}.
 	Clients map[string]Client `json:"clients"`
-	// HTTPSAddresses are the IP addresses and DNS names of this hub: the names in its certificate request.
+	// HTTPSAddresses are the IP addresses and DNS names of this hub: the SAN of its self-signed certificate.
 	HTTPSAddresses []string `json:"httpsAddresses"`
 	// HTTPS configures the HTTPS listener for agents; empty listen means no HTTPS.
 	HTTPS HTTPS `json:"https"`
@@ -168,9 +168,15 @@ func normalizeKeys(data []byte) ([]byte, error) {
 		if json.Unmarshal(raw, &h) == nil {
 			for _, old := range []string{"caCert", "cert"} {
 				if _, ok := h[old]; ok {
-					return nil, fmt.Errorf("config: https.%s is no longer used: the hub serves a self-signed certificate made from its identity key; remove it and set https.key to the path of the key (docs/hub-key.md)", old)
+					slog.Warn("removed config key, ignored; delete it and use https.key (the hub identity key)", "key", "https."+old)
+					delete(h, old)
 				}
 			}
+			out, err := json.Marshal(h)
+			if err != nil {
+				return nil, err
+			}
+			top["https"] = out
 		}
 	}
 	if raw, ok := top["ipSources"]; ok {
