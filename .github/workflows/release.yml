@@ -33,12 +33,16 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # The version, commit and build date (the commit's date, so a rebuild gives the same binary) that `--version` prints (internal/version).
+          pkg=github.com/KazuhaHub/infra-hub/internal/version
+          ldflags="-s -w -X ${pkg}.Version=${TAG#v} -X ${pkg}.Commit=$(git rev-parse --short=7 HEAD) -X ${pkg}.Date=$(TZ=UTC git show -s --date=format-local:%Y-%m-%d --format=%cd HEAD)"
           mkdir dist
           for dir in cmd/*/; do
             cmd=$(basename "$dir")
-            go build -trimpath -ldflags "-s -w" -o "dist/${cmd}-linux-${GOARCH}" "./cmd/${cmd}"
+            go build -trimpath -ldflags "$ldflags" -o "dist/${cmd}-linux-${GOARCH}" "./cmd/${cmd}"
           done
           ls -l dist
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

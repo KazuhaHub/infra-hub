@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os/exec"
 	"regexp"
@@ -119,7 +119,7 @@ func (s *Server) config(ctx context.Context) *ssh.ServerConfig {
 		PublicKeyCallback: func(meta ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			name, err := s.Ident.Identify(ctx, ConnInfo{User: meta.User(), RemoteAddr: meta.RemoteAddr(), Key: key})
 			if err != nil {
-				log.Printf("deny %s user=%q key=%s: %v", meta.RemoteAddr(), meta.User(), ssh.FingerprintSHA256(key), err)
+				slog.Warn("connection denied", "remote", meta.RemoteAddr().String(), "user", meta.User(), "fingerprint", ssh.FingerprintSHA256(key), "err", err)
 				return nil, errors.New("not allowed")
 			}
 			return &ssh.Permissions{Extensions: map[string]string{hostIdentityKey: name}}, nil
@@ -149,7 +149,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 			} else if delay *= 2; delay > time.Second {
 				delay = time.Second
 			}
-			log.Printf("accept: %v; retrying in %v", err, delay)
+			slog.Warn("accept failed, retrying", "retryIn", delay, "err", err)
 			select {
 			case <-time.After(delay):
 			case <-ctx.Done():
@@ -187,7 +187,7 @@ func (s *Server) handleConn(ctx context.Context, cfg *ssh.ServerConfig, nc net.C
 	nc.SetDeadline(time.Time{})
 	defer conn.Close()
 	host := conn.Permissions.Extensions[hostIdentityKey]
-	log.Printf("accept %s host=%s", conn.RemoteAddr(), host)
+	slog.Info("connection accepted", "remote", conn.RemoteAddr().String(), "host", host)
 	go ssh.DiscardRequests(reqs) // global requests (tcpip-forward, ...) are all refused
 	for nch := range chans {
 		if nch.ChannelType() != "session" { // no direct-tcpip, no x11, no forwarded channels
@@ -230,7 +230,7 @@ func (s *Server) session(ctx context.Context, host string, ch ssh.Channel, reqs 
 			} else if m := certCommand.FindStringSubmatch(p.Command); m != nil && s.Certs != nil {
 				// Anything but the owner, including an unknown name, gets the same refusal: nothing says whether the name exists.
 				if owner, ok := s.Certs.Owner(m[1]); !ok || owner != host {
-					log.Printf("deny host=%s cert %q: not the owner or not a known name", host, m[1])
+					slog.Warn("cert request denied", "host", host, "cert", m[1], "reason", "not the owner or not a known name")
 					req.Reply(false, nil)
 					return
 				}
@@ -239,7 +239,7 @@ func (s *Server) session(ctx context.Context, host string, ch ssh.Channel, reqs 
 			} else if m := ipListCommand.FindStringSubmatch(p.Command); m != nil && s.IPLists != nil {
 				// Not allowed and unknown look the same: nothing says whether the list exists.
 				if !s.IPLists.Allowed(m[1], host) {
-					log.Printf("deny host=%s iplist %q: not allowed or not a known list", host, m[1])
+					slog.Warn("iplist request denied", "host", host, "list", m[1], "reason", "not allowed or not a known list")
 					req.Reply(false, nil)
 					return
 				}
@@ -247,13 +247,13 @@ func (s *Server) session(ctx context.Context, host string, ch ssh.Channel, reqs 
 				run = func() { s.serveIPList(host, name, ch) }
 			} else {
 				if p.Command != "" {
-					log.Printf("deny host=%s command %q", host, p.Command)
+					slog.Warn("command denied", "host", host, "command", p.Command)
 				}
 				req.Reply(false, nil)
 				return
 			}
 			if !s.acquire(host) {
-				log.Printf("deny host=%s: too many concurrent fetches", host)
+				slog.Warn("request denied, too many concurrent fetches", "host", host)
 				req.Reply(false, nil)
 				return
 			}
@@ -275,7 +275,7 @@ func (s *Server) serveCert(host, name string, ch ssh.Channel) {
 	defer ch.Close()
 	p, err := s.Certs.Fetch(name)
 	if err != nil {
-		log.Printf("refuse host=%s cert %s: %v", host, name, err)
+		slog.Warn("cert refused", "host", host, "cert", name, "err", err)
 		fmt.Fprintf(ch.Stderr(), "hub: not serving %s, %v\n", name, err)
 		sendExit(ch, 1)
 		return
@@ -288,7 +288,7 @@ func (s *Server) serveCert(host, name string, ch ssh.Channel) {
 	if _, err := ch.Write(append(line, '\n')); err != nil {
 		return
 	}
-	log.Printf("served host=%s cert %s not_after=%s", host, name, p.NotAfter)
+	slog.Info("cert served", "host", host, "cert", name, "notAfter", p.NotAfter)
 	sendExit(ch, 0)
 }
 
@@ -299,7 +299,7 @@ func (s *Server) uploadPack(ctx context.Context, host, gitProtocol string, ch ss
 	defer ch.Close()
 	if s.Fresh != nil {
 		if err := s.Fresh(); err != nil {
-			log.Printf("refuse host=%s: %v", host, err)
+			slog.Warn("git fetch refused", "host", host, "err", err)
 			fmt.Fprintf(ch.Stderr(), "hub: not serving, %v\n", err)
 			sendExit(ch, 1)
 			return
@@ -335,9 +335,9 @@ func (s *Server) uploadPack(ctx context.Context, host, gitProtocol string, ch ss
 	}
 	if code == 0 {
 		s.State.Touch(host, refs)
-		log.Printf("served host=%s git-upload-pack main=%.12s", host, refs["refs/heads/main"])
+		slog.Info("git fetch served", "host", host, "main", short(refs["refs/heads/main"]))
 	} else {
-		log.Printf("failed host=%s git-upload-pack exit=%d", host, code)
+		slog.Warn("git fetch failed", "host", host, "exit", code)
 	}
 	sendExit(ch, code)
 }
@@ -354,7 +354,7 @@ func (s *Server) serveIPList(host, name string, ch ssh.Channel) {
 	defer ch.Close()
 	p, err := s.IPLists.Serve(name)
 	if err != nil {
-		log.Printf("refuse host=%s iplist %s: %v", host, name, err)
+		slog.Warn("iplist refused", "host", host, "list", name, "err", err)
 		fmt.Fprintf(ch.Stderr(), "hub: not serving %s, %v\n", name, err)
 		sendExit(ch, 1)
 		return
@@ -367,6 +367,14 @@ func (s *Server) serveIPList(host, name string, ch ssh.Channel) {
 	if _, err := ch.Write(append(line, '\n')); err != nil {
 		return
 	}
-	log.Printf("served host=%s iplist %s version=%.12s entries=%d warnings=%d", host, name, p.Version, len(p.CIDRs), len(p.Warnings))
+	slog.Info("iplist served", "host", host, "list", name, "version", short(p.Version), "entries", len(p.CIDRs), "warnings", len(p.Warnings))
 	sendExit(ch, 0)
+}
+
+// short is the first 12 characters of a commit or version, enough to read in a log line.
+func short(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }

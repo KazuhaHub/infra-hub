@@ -30,11 +30,26 @@ This is the code only. Your data (inventory, templates, roles, secrets) stays in
 Commands:
 
 ```
-infra-hub serve  -config /etc/infra-hub/config.json
-infra-hub status -config /etc/infra-hub/config.json [-no-refs]
-infra-hub iplist-accept  [-config file] <provider>
-infra-hub iplist-history [-config file] <list> [--limit N]
+infra-hub serve                                   run the hub
+infra-hub status [-o json] [--no-refs]            mirror, hosts, certificates, IP lists
+infra-hub iplist accept <provider>                apply a held IP list update
+infra-hub iplist history <list> [--limit N]       change history of a list (JSON)
+infra-hub version                                 also: infra-hub --version
 ```
+
+Every flag can also come from the environment as `INFRA_HUB_<NAME>` (`--config` is `INFRA_HUB_CONFIG`, `--log-level`
+is `INFRA_HUB_LOG_LEVEL`); the config file defaults to `/etc/infra-hub/config.json`. Logs go to stderr through
+`log/slog`, as `key=value` text by default or JSON with `--log-format json`; `--log-level` is `debug`, `info` (default),
+`warn` or `error`. Exit codes: `0` success, `1` the operation failed, `2` usage error, `3` not ready (`status`: the
+mirror has not fetched yet).
+
+`status -o json` prints the document described in [docs/conventions.md](docs/conventions.md): `"apiVersion": "v1"`,
+lower camelCase keys, RFC 3339 UTC times, durations as `...Seconds`, hosts, certificates, providers and lists as arrays
+sorted by name.
+
+Deprecated, removed in the next release: the old spellings `-config`, `-no-refs`, `-limit`, `iplist-accept` and
+`iplist-history` still work and print a warning on stderr. With `-config`, `status` keeps printing the previous
+snake_case JSON (also available as the hidden `--format legacy`) unless `-o` is given.
 
 The config is one JSON file; see `internal/config/config.go` for every field.
 

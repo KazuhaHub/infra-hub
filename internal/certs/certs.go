@@ -8,7 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -202,7 +202,7 @@ func (m *CertManager) RunOnce(ctx context.Context) time.Time {
 		_, notAfter, err := m.Store.LoadBundle(name)
 		have := err == nil
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			log.Printf("cert %s: stored bundle unusable, will obtain a new one: %v", name, err)
+			slog.Warn("stored bundle unusable, will obtain a new one", "cert", name, "err", err)
 		}
 		rec := m.Store.LoadRecord(name)
 		now := m.now()
@@ -220,7 +220,7 @@ func (m *CertManager) RunOnce(ctx context.Context) time.Time {
 		pending.LastAttempt = started
 		pending.NextAttempt = now.Add(BackoffDelay(rec.Failures + 1)).UTC().Truncate(time.Second)
 		if err := m.Store.SaveRecord(name, pending); err != nil {
-			log.Printf("cert %s: cannot record the attempt, not trying: %v", name, err)
+			slog.Error("cannot record the attempt, not trying", "cert", name, "err", err)
 			continue
 		}
 		b, err := m.Issuer.Obtain(ctx, name)
@@ -236,16 +236,16 @@ func (m *CertManager) RunOnce(ctx context.Context) time.Time {
 			rec.LastResult, rec.LastError = "error", err.Error()
 			rec.Failures++
 			rec.NextAttempt = now.Add(BackoffDelay(rec.Failures)).UTC().Truncate(time.Second)
-			log.Printf("cert %s: attempt failed (%d in a row), next try after %s: %v", name, rec.Failures, rec.NextAttempt.Format(time.RFC3339), err)
+			slog.Error("certificate attempt failed", "cert", name, "failures", rec.Failures, "nextAttempt", rec.NextAttempt.UTC().Format(time.RFC3339), "err", err)
 			if retryAt.IsZero() || rec.NextAttempt.Before(retryAt) {
 				retryAt = rec.NextAttempt
 			}
 		} else {
 			rec.LastResult, rec.LastError, rec.Failures, rec.NextAttempt = "ok", "", 0, time.Time{}
-			log.Printf("cert %s: issued, expires %s", name, notAfter.Format(time.RFC3339))
+			slog.Info("certificate issued", "cert", name, "notAfter", notAfter.UTC().Format(time.RFC3339))
 		}
 		if serr := m.Store.SaveRecord(name, rec); serr != nil {
-			log.Printf("cert %s: cannot save record: %v", name, serr)
+			slog.Error("cannot save certificate record", "cert", name, "err", serr)
 		}
 	}
 	return retryAt
@@ -304,7 +304,7 @@ func (m *CertManager) Fetch(name string) (CertPayload, error) {
 		return CertPayload{}, errNoCert
 	}
 	if err != nil {
-		log.Printf("cert %s: %v", name, err)
+		slog.Error("cannot load stored certificate", "cert", name, "err", err)
 		return CertPayload{}, errBadCert
 	}
 	if notAfter.Sub(m.now()) < MinServeRemaining {
