@@ -73,7 +73,7 @@ type Config struct {
 type HTTPS struct {
 	// Listen is host:port. Empty: HTTPS is off.
 	Listen string `json:"listen"`
-	// Key is the path of the hub identity key (Ed25519, PKCS#8 PEM, mode 0600), the same on every hub. The hub builds
+	// Key is the path of the hub identity key (ECDSA P-256, PKCS#8 PEM, mode 0600), the same on every hub. The hub builds
 	// its self-signed certificate from it at every start (docs/hub-key.md).
 	Key string `json:"key"`
 }

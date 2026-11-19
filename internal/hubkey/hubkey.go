@@ -1,11 +1,14 @@
-// Package hubkey is the hub identity key: one Ed25519 key shared by every hub, whose public-key pin is all an agent
+// Package hubkey is the hub identity key: one ECDSA P-256 key shared by every hub, whose public-key pin is all an agent
 // needs to trust a hub. The hub builds a self-signed certificate from it in memory at every start; there are no
 // certificate files and nothing to renew.
 package hubkey
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -27,13 +30,12 @@ import (
 var NotAfter = time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC)
 
 // Generate returns a new key.
-func Generate() (ed25519.PrivateKey, error) {
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	return key, err
+func Generate() (*ecdsa.PrivateKey, error) {
+	return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 }
 
 // Marshal is the PKCS#8 PEM form of the key.
-func Marshal(key ed25519.PrivateKey) ([]byte, error) {
+func Marshal(key *ecdsa.PrivateKey) ([]byte, error) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return nil, err
@@ -42,7 +44,7 @@ func Marshal(key ed25519.PrivateKey) ([]byte, error) {
 }
 
 // WriteNew writes the key to path with mode 0600. It refuses to overwrite an existing file.
-func WriteNew(path string, key ed25519.PrivateKey) error {
+func WriteNew(path string, key *ecdsa.PrivateKey) error {
 	data, err := Marshal(key)
 	if err != nil {
 		return err
@@ -71,10 +73,10 @@ func WriteNew(path string, key ed25519.PrivateKey) error {
 	return nil
 }
 
-// Read reads a PKCS#8 PEM Ed25519 key. The path (after following a symlink) must be a regular file, which is checked
+// Read reads a PKCS#8 PEM ECDSA P-256 key. The path (after following a symlink) must be a regular file, which is checked
 // before it is opened so that a FIFO or device cannot block the hub; the file is then opened without blocking, it must
 // be the same file, and its mode is checked on the open handle: no access for group or others.
-func Read(path string) (ed25519.PrivateKey, error) {
+func Read(path string) (*ecdsa.PrivateKey, error) {
 	before, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -104,8 +106,8 @@ func Read(path string) (ed25519.PrivateKey, error) {
 	return Parse(data)
 }
 
-// Parse reads a PKCS#8 PEM Ed25519 key.
-func Parse(data []byte) (ed25519.PrivateKey, error) {
+// Parse reads a PKCS#8 PEM ECDSA P-256 key.
+func Parse(data []byte) (*ecdsa.PrivateKey, error) {
 	b, _ := pem.Decode(data)
 	if b == nil || b.Type != "PRIVATE KEY" {
 		return nil, errors.New("not a PKCS#8 PEM private key")
@@ -114,22 +116,34 @@ func Parse(data []byte) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, errors.New("not a PKCS#8 PEM private key")
 	}
-	ed, ok := k.(ed25519.PrivateKey)
-	if !ok {
-		return nil, errors.New("not an Ed25519 key")
+	ec, ok := k.(*ecdsa.PrivateKey)
+	if !ok || ec.Curve != elliptic.P256() {
+		return nil, fmt.Errorf("the hub identity key must be an ECDSA P-256 key (found %s); run `infra-hub key init` again to make one", keyKind(k))
 	}
-	return ed, nil
+	return ec, nil
+}
+
+func keyKind(k any) string {
+	switch k := k.(type) {
+	case ed25519.PrivateKey:
+		return "Ed25519"
+	case *rsa.PrivateKey:
+		return "RSA"
+	case *ecdsa.PrivateKey:
+		return "ECDSA " + k.Curve.Params().Name
+	}
+	return "an unknown type"
 }
 
 // Pin is the pin of the key's public half.
-func Pin(key ed25519.PrivateKey) (string, error) {
+func Pin(key *ecdsa.PrivateKey) (string, error) {
 	return hubtrust.PinOfKey(key.Public())
 }
 
 // Certificate builds the hub's self-signed certificate in memory: SAN is addresses (IP addresses and DNS names),
 // valid from an hour before now until NotAfter. Agents ignore everything but the key; the names and dates exist so
 // that ordinary TLS clients and tools can read the certificate.
-func Certificate(key ed25519.PrivateKey, addresses []string, now time.Time) (*tls.Certificate, error) {
+func Certificate(key *ecdsa.PrivateKey, addresses []string, now time.Time) (*tls.Certificate, error) {
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 127))
 	if err != nil {
 		return nil, err
@@ -140,6 +154,7 @@ func Certificate(key ed25519.PrivateKey, addresses []string, now time.Time) (*tl
 		NotBefore:             now.Add(-time.Hour).UTC(),
 		NotAfter:              NotAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature,
+		SignatureAlgorithm:    x509.ECDSAWithSHA256,
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 	}
@@ -150,7 +165,7 @@ func Certificate(key ed25519.PrivateKey, addresses []string, now time.Time) (*tl
 			tmpl.DNSNames = append(tmpl.DNSNames, a)
 		}
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		return nil, err
 	}

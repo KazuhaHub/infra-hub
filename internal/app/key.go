@@ -19,12 +19,12 @@ func checkOutput(cmd *cobra.Command) (asJSON bool, err error) {
 	return output == "json", nil
 }
 
-// newKey is the hub identity key commands: one Ed25519 key shared by every hub, whose pin is what agents trust.
+// newKey is the hub identity key commands: one ECDSA P-256 key shared by every hub, whose pin is what agents trust.
 func (c *cli) newKey() *cobra.Command {
 	k := &cobra.Command{
 		Use:   "key",
 		Short: "The hub identity key (generate it once, share it with every hub)",
-		Long: "The hub identity key is one Ed25519 key that every hub (primary and standbys) uses. Each hub builds a self-signed\n" +
+		Long: "The hub identity key is one ECDSA P-256 key that every hub (primary and standbys) uses. Each hub builds a self-signed\n" +
 			"certificate from it at start; agents trust a hub if and only if its key matches a pin. There is no certificate to\n" +
 			"renew. See docs/hub-key.md.",
 		Args: usageArgs(cobra.NoArgs),
@@ -40,7 +40,7 @@ func (c *cli) newKeyInit() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init --out <path>",
 		Short: "Generate the hub identity key and print its pin",
-		Long: "Writes a new Ed25519 key (PKCS#8 PEM, mode 0600) to <path> and prints its pin (sha256//<base64>). It refuses to\n" +
+		Long: "Writes a new ECDSA P-256 key (PKCS#8 PEM, mode 0600) to <path> and prints its pin (sha256//<base64>). It refuses to\n" +
 			"overwrite an existing file. The key is not encrypted: store it in SOPS at once and delete the plain file\n" +
 			"(docs/hub-key.md). The pin is public.",
 		Args: usageArgs(cobra.NoArgs),

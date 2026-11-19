@@ -2,7 +2,7 @@ package httpsapi
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
 	"crypto/tls"
 	"log/slog"
 	"net"
@@ -13,7 +13,7 @@ import (
 
 // Runner serves HTTPS with a self-signed certificate that it builds in memory from the hub identity key.
 type Runner struct {
-	Key       ed25519.PrivateKey
+	Key       *ecdsa.PrivateKey
 	Addresses []string // IPs and DNS names for the certificate's SAN
 	Listen    string
 	Server    *Server

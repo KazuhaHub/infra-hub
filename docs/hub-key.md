@@ -8,7 +8,9 @@ All example values below are placeholders.
 
 ## How it works
 
-- The key is an Ed25519 key in a PKCS#8 PEM file.
+- The key is an ECDSA P-256 key in a PKCS#8 PEM file (`PRIVATE KEY`). P-256 is the curve that every TLS client
+  supports; the system curl of macOS (LibreSSL) cannot handshake with an Ed25519 certificate. A key of any other type
+  is refused: run `key init` again.
 - At every start the hub builds a self-signed certificate from the key in memory: the names are `httpsAddresses`, it
   is valid from one hour before the start until 9999-12-31T23:59:59Z (the RFC 5280 value for "no well-defined
   expiration"), and it is served over TLS 1.3 only. Nothing is written to disk.

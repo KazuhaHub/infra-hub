@@ -4,7 +4,7 @@
 
 ### Added
 
-- The hub identity key: one Ed25519 key shared by every hub, whose pin (`sha256//...`) is all an agent needs.
+- The hub identity key: one ECDSA P-256 key shared by every hub, whose pin (`sha256//...`) is all an agent needs.
   `infra-hub key init --out <path>` generates it (refuses to overwrite) and prints the pin, and `key pin --key <path>`
   prints it again. `infra-hub token --pin <pin>... [--key <path>] --hub <url>...` prints the one-line `ih1.` token for an
   agent install (public pins and hub URLs only, no secret; several pins during a rotation). `-o json` is supported.

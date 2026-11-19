@@ -1,7 +1,8 @@
 package hubtrust
 
 import (
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -15,16 +16,16 @@ import (
 	"time"
 )
 
-func newKey(t *testing.T) ed25519.PrivateKey {
+func newKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
-	_, k, err := ed25519.GenerateKey(rand.Reader)
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return k
 }
 
-func keyPin(t *testing.T, k ed25519.PrivateKey) string {
+func keyPin(t *testing.T, k *ecdsa.PrivateKey) string {
 	t.Helper()
 	p, err := PinOfKey(k.Public())
 	if err != nil {
@@ -34,14 +35,14 @@ func keyPin(t *testing.T, k ed25519.PrivateKey) string {
 }
 
 // certFor makes a self-signed certificate for key with the given template changes.
-func certFor(t *testing.T, key ed25519.PrivateKey, tweak func(*x509.Certificate)) *x509.Certificate {
+func certFor(t *testing.T, key *ecdsa.PrivateKey, tweak func(*x509.Certificate)) *x509.Certificate {
 	t.Helper()
 	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "x"},
 		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), DNSNames: []string{"hub.example.org"}}
 	if tweak != nil {
 		tweak(tmpl)
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, key.Public(), key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +98,7 @@ func TestTheKeyIsTheTrust(t *testing.T) {
 func TestMultiplePinsAllowRotation(t *testing.T) {
 	oldKey, newK := newKey(t), newKey(t)
 	both := Verifier{Pins: []string{keyPin(t, oldKey), keyPin(t, newK)}}
-	for name, k := range map[string]ed25519.PrivateKey{"old": oldKey, "new": newK} {
+	for name, k := range map[string]*ecdsa.PrivateKey{"old": oldKey, "new": newK} {
 		if err := both.VerifyChain(ders(certFor(t, k, nil))); err != nil {
 			t.Errorf("%s key: %v", name, err)
 		}

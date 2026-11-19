@@ -39,7 +39,7 @@ the next changes build towards.
 The link between agents and hubs must not depend on any outside service, so it does not use Let's Encrypt, and there is
 no CA of our own either. It works like an SSH host key:
 
-- There is one **hub identity key** (Ed25519, PKCS#8 PEM), the same on every hub (primary and standbys), so all hubs
+- There is one **hub identity key** (ECDSA P-256, PKCS#8 PEM), the same on every hub (primary and standbys), so all hubs
   have one fingerprint. It is generated once (`infra-hub key init`, see [hub-key.md](hub-key.md)), kept in SOPS for the
   hubs and the admin, and deployed to the path `https.key` in each hub's config (mode 0600).
 - At start the hub builds a **self-signed certificate** from the key in memory: SAN = `httpsAddresses`, NotBefore =

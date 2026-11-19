@@ -78,7 +78,7 @@ examples):
 
 A client is either its SSH public key as a string (the old form) or an object with `sshKey` and an optional
 `agePublicKey` (a host without one gets no challenge). Only age X25519 keys (`age1...`) are supported. `https.key` is
-the hub identity key (Ed25519, PKCS#8 PEM, mode 0600), the same file on every hub. At start the hub builds a
+the hub identity key (ECDSA P-256, PKCS#8 PEM, mode 0600), the same file on every hub. At start the hub builds a
 self-signed certificate from it in memory (names from `httpsAddresses`, valid until 9999-12-31); there are no
 certificate files and nothing to renew. An agent trusts a hub if and only if the key matches its pin
 (`internal/hubtrust`). The earlier `https.cert` and `https.caCert` are gone; for one release they are ignored with a

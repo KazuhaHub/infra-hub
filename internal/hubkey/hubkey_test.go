@@ -1,8 +1,13 @@
 package hubkey
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"encoding/pem"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +88,10 @@ func TestCertificate(t *testing.T) {
 	if err := c.CheckSignatureFrom(c); err == nil && c.IsCA {
 		t.Error("the certificate is a CA")
 	}
-	pub := c.PublicKey.(ed25519.PublicKey)
+	pub := c.PublicKey.(*ecdsa.PublicKey)
+	if c.SignatureAlgorithm != x509.ECDSAWithSHA256 {
+		t.Errorf("signature algorithm %v", c.SignatureAlgorithm)
+	}
 	if !pub.Equal(k.Public()) {
 		t.Error("certificate is not for the key")
 	}
@@ -96,5 +104,38 @@ func TestCertificate(t *testing.T) {
 	c2, _ := x509.ParseCertificate(tc2.Certificate[0])
 	if hubtrust.Pin(c2) != pin {
 		t.Error("second certificate has another pin")
+	}
+}
+
+func TestGenerateIsP256(t *testing.T) {
+	k, err := Generate()
+	if err != nil || k.Curve != elliptic.P256() {
+		t.Fatalf("%v %v", k, err)
+	}
+	data, _ := Marshal(k)
+	if !strings.HasPrefix(string(data), "-----BEGIN PRIVATE KEY-----") {
+		t.Errorf("PEM type: %.40s", data)
+	}
+}
+
+// Only ECDSA P-256 is accepted: the system curl of macOS (LibreSSL) cannot do a TLS handshake with other key types.
+func TestOtherKeyTypesAreRefused(t *testing.T) {
+	dir := t.TempDir()
+	_, ed, _ := ed25519.GenerateKey(rand.Reader)
+	p384, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	rk, _ := rsa.GenerateKey(rand.Reader, 2048)
+	for name, key := range map[string]any{"Ed25519": ed, "ECDSA P-384": p384, "RSA": rk} {
+		der, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_"))
+		if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err = Read(path)
+		if err == nil || !strings.Contains(err.Error(), "P-256") || !strings.Contains(err.Error(), "key init") || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }
