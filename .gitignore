@@ -1,0 +1,4 @@
+/dist/
+/infra-hub
+/infra-agent
+*.test

@@ -1,0 +1,10 @@
+[
+  {"name": "8192 IPv6 /16s are far beyond the cap", "kind": "v6_slash16", "count": 8192, "ok": false},
+  {"name": "one IPv6 /16 is already beyond 2^100", "kind": "v6_slash16", "count": 1, "ok": false},
+  {"name": "sixteen IPv6 /32s (2^100) are at the cap", "kind": "v6_slash32", "count": 16, "ok": true},
+  {"name": "seventeen IPv6 /32s are over it", "kind": "v6_slash32", "count": 17, "ok": false},
+  {"name": "20 IPv4 /8s are under the cap", "kind": "v4_slash8", "count": 20, "ok": true},
+  {"name": "80 IPv4 /8s are over it", "kind": "v4_slash8", "count": 80, "ok": false},
+  {"name": "100001 entries are too many", "kind": "v4_slash24", "count": 100001, "ok": false},
+  {"name": "1000 IPv4 /24s are fine", "kind": "v4_slash24", "count": 1000, "ok": true}
+]

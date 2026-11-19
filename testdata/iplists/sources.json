@@ -1,0 +1,31 @@
+{
+  "cloudflare": {
+    "url": "https://api.cloudflare.com/client/v4/ips",
+    "format": "json",
+    "select": ["result.ipv4_cidrs", "result.ipv6_cidrs"]
+  },
+  "fastly": {
+    "url": "https://api.fastly.com/public-ip-list",
+    "format": "json",
+    "select": ["addresses", "ipv6_addresses"]
+  },
+  "aws_cloudfront": {
+    "url": "https://ip-ranges.amazonaws.com/ip-ranges.json",
+    "format": "json",
+    "select": [
+      "prefixes[?service=='CLOUDFRONT' || service=='CLOUDFRONT_ORIGIN_FACING'].ip_prefix",
+      "ipv6_prefixes[?service=='CLOUDFRONT' || service=='CLOUDFRONT_ORIGIN_FACING'].ipv6_prefix"
+    ],
+    "max_bytes": 8388608
+  },
+  "github_hooks": {
+    "url": "https://api.github.com/meta",
+    "format": "json",
+    "select": ["hooks"]
+  },
+  "google": {
+    "url": "https://www.gstatic.com/ipranges/goog.json",
+    "format": "json",
+    "select": ["prefixes[].ipv4Prefix", "prefixes[].ipv6Prefix"]
+  }
+}
