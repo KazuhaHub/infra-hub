@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
+
+	legolog "github.com/go-acme/lego/v4/log"
 )
 
 // Redacted replaces whatever may be a secret.
@@ -29,8 +32,10 @@ var (
 )
 
 var (
-	pemKey  = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(-----END [A-Z0-9 ]*PRIVATE KEY-----|$)`)
-	urlAuth = regexp.MustCompile(`(://)[^/@\s]+:[^/@\s]*@`)
+	pemKey = regexp.MustCompile(`(?s)-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(-----END [A-Z0-9 ]*PRIVATE KEY-----|$)`)
+	// urlAuth matches the userinfo of a URL, with or without a password, up to the last "@" before the host (a
+	// password may itself contain "@").
+	urlAuth = regexp.MustCompile(`(://)[^/\s]*@`)
 )
 
 // AddSecret registers a value (a token, a nonce, a password) that must never appear in the log. Very short values
@@ -69,22 +74,56 @@ func Scrub(s string) string {
 	return s
 }
 
+// render is fmt's text of v (or Error() / String()), and false when the value panics while rendering (a nil pointer
+// receiver, for instance); the caller then leaves the value to slog's own rendering.
+func render(v any) (text string, ok bool) {
+	defer func() {
+		if recover() != nil {
+			text, ok = "", false
+		}
+	}()
+	switch x := v.(type) {
+	case error:
+		return x.Error(), true
+	case fmt.Stringer:
+		return x.String(), true
+	case []byte:
+		return string(x), true
+	}
+	return fmt.Sprint(v), true
+}
+
+// replaceAttr scrubs strings, errors, Stringers and byte slices, and any other value whose text contains a secret.
+// A value whose text holds none is passed on unchanged, so structured values keep their JSON form.
 func replaceAttr(_ []string, a slog.Attr) slog.Attr {
 	a.Value = a.Value.Resolve()
 	switch a.Value.Kind() {
 	case slog.KindString:
 		a.Value = slog.StringValue(Scrub(a.Value.String()))
 	case slog.KindAny:
-		switch v := a.Value.Any().(type) {
-		case error:
-			a.Value = slog.StringValue(Scrub(v.Error()))
-		case fmt.Stringer:
-			a.Value = slog.StringValue(Scrub(v.String()))
-		case []byte:
-			a.Value = slog.StringValue(Scrub(string(v)))
+		v := a.Value.Any()
+		text, ok := render(v)
+		if !ok {
+			return a // slog renders it (it recovers from a panicking value itself)
+		}
+		switch v.(type) {
+		case error, fmt.Stringer, []byte:
+			a.Value = slog.StringValue(Scrub(text))
+		default:
+			if scrubbed := Scrub(text); scrubbed != text {
+				a.Value = slog.StringValue(scrubbed)
+			}
 		}
 	}
 	return a
+}
+
+// Install makes logger the default logger and also the destination of the ACME library's own log output, which
+// otherwise goes straight to stderr, unredacted and in another format. The standard library's log package follows
+// the default logger already.
+func Install(logger *slog.Logger) {
+	slog.SetDefault(logger)
+	legolog.Logger = slog.NewLogLogger(logger.Handler(), slog.LevelInfo)
 }
 
 // New returns a logger writing to w. format is "text" (key=value, the default) or "json"; level is debug, info, warn
@@ -104,6 +143,15 @@ func New(w io.Writer, format, level string) (*slog.Logger, error) {
 		return nil, fmt.Errorf("log level %q: want debug, info, warn or error", level)
 	}
 	opts := &slog.HandlerOptions{Level: lv, ReplaceAttr: replaceAttr}
+	if os.Getenv("JOURNAL_STREAM") != "" && (format == "" || strings.EqualFold(format, "text")) {
+		// stderr is the journal, which stamps every line itself.
+		opts.ReplaceAttr = func(g []string, a slog.Attr) slog.Attr {
+			if len(g) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return replaceAttr(g, a)
+		}
+	}
 	switch strings.ToLower(format) {
 	case "", "text":
 		return slog.New(slog.NewTextHandler(w, opts)), nil

@@ -95,7 +95,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 			slog.Warn("not issuing certificates, no Cloudflare token", "path", tokenPath, "err", err)
 		} else {
 			logx.AddSecret(token)
-			certMgr.Issuer = &certs.LegoIssuer{Directory: cfg.AcmeDirectory, Email: cfg.AcmeEmail, Dir: filepath.Join(cfg.CertDir, "account"), CFToken: token}
+			certMgr.Issuer = newIssuer(cfg, token)
 			issuing = true
 		}
 	}
@@ -127,6 +127,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 	maxStale := time.Duration(cfg.MaxStaleSeconds) * time.Second
 	srv.Fresh = func() error { return mirror.Fresh(maxStale) }
 	return srv.Serve(ctx, ln)
+}
+
+// newIssuer is the ACME issuer with the Cloudflare token (a variable so that tests can supply another).
+var newIssuer = func(cfg config.Config, token string) certs.Issuer {
+	return &certs.LegoIssuer{Directory: cfg.AcmeDirectory, Email: cfg.AcmeEmail, Dir: filepath.Join(cfg.CertDir, "account"), CFToken: token}
 }
 
 func newIPManager(cfg config.Config) *iplists.IPManager {

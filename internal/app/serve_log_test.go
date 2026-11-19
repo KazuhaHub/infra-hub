@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	legolog "github.com/go-acme/lego/v4/log"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
@@ -50,6 +52,11 @@ func (b *syncBuffer) String() string {
 // makeBundle makes a bundle for name (a leaf under a throwaway CA) that is valid for 60 days; it also returns the
 // base64 body of the leaf's private key.
 func makeBundle(t *testing.T, name string) (certs.Bundle, string) {
+	return makeBundleUntil(t, name, time.Now().Add(60*24*time.Hour))
+}
+
+// makeBundleUntil is makeBundle with a chosen expiry of the leaf.
+func makeBundleUntil(t *testing.T, name string, notAfter time.Time) (certs.Bundle, string) {
 	t.Helper()
 	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	caTmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test ca"}, NotBefore: time.Now().Add(-time.Hour),
@@ -60,7 +67,7 @@ func makeBundle(t *testing.T, name string) (certs.Bundle, string) {
 	}
 	caCert, _ := x509.ParseCertificate(caDER)
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: []string{name}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(60 * 24 * time.Hour),
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: []string{name}, NotBefore: time.Now().Add(-time.Hour), NotAfter: notAfter,
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
 	if err != nil {
@@ -76,9 +83,16 @@ func makeBundle(t *testing.T, name string) (certs.Bundle, string) {
 func TestServeLogHasNoSecrets(t *testing.T) {
 	testutil.NeedTool(t, "git")
 	const cfToken = "cf-API-token-do-not-log-0123456789"
-	for _, format := range []string{"text", "json"} {
-		t.Run(format, func(t *testing.T) {
+	for _, tc := range []struct{ format, issuer string }{{"text", "lego"}, {"json", "lego"}, {"text", "failing"}, {"json", "failing"}} {
+		format := tc.format
+		t.Run(tc.format+"-"+tc.issuer, func(t *testing.T) {
 			t.Cleanup(logx.ResetSecrets)
+			if tc.issuer == "failing" {
+				// An issuer whose error text, and whose own log line, carry the token that serve registered.
+				prevIssuer := newIssuer
+				newIssuer = func(_ config.Config, token string) certs.Issuer { return failingIssuer{token} }
+				t.Cleanup(func() { newIssuer = prevIssuer })
+			}
 			dir := t.TempDir()
 			signer, clientKey := testutil.NewKey(t)
 			stranger, _ := testutil.NewKey(t)
@@ -110,9 +124,9 @@ func TestServeLogHasNoSecrets(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			prev := slog.Default()
-			slog.SetDefault(logger)
-			t.Cleanup(func() { slog.SetDefault(prev) })
+			prev, prevLego := slog.Default(), legolog.Logger
+			logx.Install(logger)
+			t.Cleanup(func() { slog.SetDefault(prev); legolog.Logger = prevLego })
 
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
@@ -148,11 +162,22 @@ func TestServeLogHasNoSecrets(t *testing.T) {
 					t.Errorf("the log contains the %s:\n%s", what, out)
 				}
 			}
+			if tc.issuer == "failing" && (!strings.Contains(out, logx.Redacted) || !strings.Contains(out, "CF API rejected")) {
+				t.Errorf("the failing issuer's error was not logged, redacted:\n%s", out)
+			}
 			if !strings.Contains(out, "stored.example.org") {
 				t.Errorf("the log lost its content:\n%s", out)
 			}
 		})
 	}
+}
+
+// failingIssuer fails the way a broken API call can: with the credential inside the error text and in lego's log.
+type failingIssuer struct{ token string }
+
+func (f failingIssuer) Obtain(_ context.Context, name string) (certs.Bundle, error) {
+	legolog.Infof("[%s] dns-01 with token %s", name, f.token)
+	return certs.Bundle{}, fmt.Errorf("CF API rejected token %s for %s", f.token, name)
 }
 
 func waitFor(t *testing.T, b *syncBuffer, text string) {

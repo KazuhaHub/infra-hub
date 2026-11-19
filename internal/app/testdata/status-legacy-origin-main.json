@@ -1,18 +1,14 @@
 {
   "time": "2026-11-19T08:20:33Z",
-  "main": "1111111111111111111111111111111111111111",
-  "main_attestation": "2222222222222222222222222222222222222222",
+  "main": "",
+  "main_attestation": "",
   "mirror_last_success": "2026-11-19T08:18:58Z",
   "mirror_age_seconds": 95,
   "hosts": {
-    "app-1": {
-      "last_seen": "2026-11-19T08:20:23Z",
-      "main": "1111111111111111111111111111111111111111"
-    },
-    "spare3": {
+    "h1": {
       "last_seen": "0001-01-01T00:00:00Z"
     },
-    "web-2": {
+    "h2": {
       "last_seen": "2026-11-19T08:17:33Z",
       "main": "1111111111111111111111111111111111111111",
       "main_attestation": "2222222222222222222222222222222222222222"
@@ -21,7 +17,7 @@
   "issuer": "enabled",
   "certs": {
     "a.example.org": {
-      "owner": "app-1",
+      "owner": "h1",
       "not_after": null,
       "last_attempt": "2026-11-19T08:00:00Z",
       "last_result": "error",
@@ -31,7 +27,7 @@
       "next_attempt": "2026-11-19T12:00:00Z"
     },
     "b.example.org": {
-      "owner": "web-2",
+      "owner": "h2",
       "not_after": "2027-01-17T00:00:00Z",
       "last_attempt": "2026-11-18T03:00:00Z",
       "last_result": "ok",
@@ -41,55 +37,49 @@
   },
   "iplists": {
     "providers": {
-      "cloudflare": {
-        "last_success": "2026-11-19T08:10:00Z",
-        "count": 22,
-        "last_change": "2026-11-19T08:10:00Z",
-        "failures": 0,
-        "held": true,
-        "held_reason": "grew by 60%",
-        "pending_count": 36,
-        "failing": false
-      },
-      "fastly": {
-        "last_success": "2026-11-19T08:10:00Z",
-        "count": 40,
+      "cdn": {
+        "last_success": "2099-01-01T00:00:00Z",
+        "count": 2,
         "last_change": "2026-11-01T00:00:00Z",
         "failures": 0,
-        "held": false,
+        "next_attempt": "2099-01-01T01:00:00Z",
+        "held": true,
+        "held_reason": "grew by 50%",
+        "pending_count": 3,
         "failing": false
       }
     },
     "lists": {
       "edge": {
         "providers": [
-          "cloudflare",
-          "fastly"
+          "cdn"
         ],
         "manual": 1,
         "hosts": [
-          "app-1",
-          "web-2"
+          "h1",
+          "h2"
         ],
-        "entries": 63,
-        "version": "0123456789abcdef",
-        "warnings": [],
+        "entries": 3,
+        "version": "94beabfd8a54184e4f8d3856fce43c929793f91056b8bbf7769d965607d02d91",
+        "warnings": [
+          "held:cdn update held (grew by 50%); the previous list is still served; see infra-hub iplist-accept"
+        ],
         "history": [
           {
             "time": "2026-11-19T08:10:00Z",
             "event": "held",
-            "provider": "cloudflare",
-            "version": "0123456789abcdef",
-            "previous_version": "0123456789abcdef",
+            "provider": "cdn",
+            "version": "v1",
+            "previous_version": "v1",
             "added": [
-              "198.51.100.0/24"
+              "9.9.9.0/24"
             ],
             "removed": [],
             "added_count": 1,
             "removed_count": 0,
-            "count_before": 22,
-            "count_after": 36,
-            "reason": "grew by 60%"
+            "count_before": 3,
+            "count_after": 4,
+            "reason": "grew by 50%"
           }
         ]
       }

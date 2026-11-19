@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -144,14 +143,12 @@ func applyEnv(fs *pflag.FlagSet) error {
 				err = fmt.Errorf("%s=%q: %w", name, v, e)
 				return
 			}
-			f.Changed = true
 		}
 	})
 	return err
 }
 
-// setupLogging installs the slog logger (stderr). It is also the default logger, which carries the standard
-// library's log package (used by the ACME library) to the same place.
+// setupLogging installs the slog logger (stderr) as the default logger, and as the ACME library's logger.
 func (c *cli) setupLogging(cmd *cobra.Command) error {
 	format, _ := cmd.Flags().GetString("log-format")
 	level, _ := cmd.Flags().GetString("log-level")
@@ -159,7 +156,7 @@ func (c *cli) setupLogging(cmd *cobra.Command) error {
 	if err != nil {
 		return &exitError{code: ExitUsage, err: err}
 	}
-	slog.SetDefault(logger)
+	logx.Install(logger)
 	return nil
 }
 

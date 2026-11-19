@@ -36,9 +36,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          # The version, commit and build date that `--version` prints (internal/version).
+          # The version, commit and build date (the commit's date, so a rebuild gives the same binary) that `--version` prints (internal/version).
           pkg=github.com/KazuhaHub/infra-hub/internal/version
-          ldflags="-s -w -X ${pkg}.Version=${TAG#v} -X ${pkg}.Commit=$(git rev-parse --short=7 HEAD) -X ${pkg}.Date=$(date -u +%Y-%m-%d)"
+          ldflags="-s -w -X ${pkg}.Version=${TAG#v} -X ${pkg}.Commit=$(git rev-parse --short=7 HEAD) -X ${pkg}.Date=$(TZ=UTC git show -s --date=format-local:%Y-%m-%d --format=%cd HEAD)"
           mkdir dist
           for dir in cmd/*/; do
             cmd=$(basename "$dir")

@@ -13,8 +13,10 @@ import (
 
 	"github.com/KazuhaHub/infra-hub/internal/config"
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
+	"github.com/KazuhaHub/infra-hub/internal/logx"
 	"github.com/KazuhaHub/infra-hub/internal/testutil"
 	"github.com/KazuhaHub/infra-hub/internal/version"
+	legolog "github.com/go-acme/lego/v4/log"
 )
 
 // hubDir is a config file and the state it points at.
@@ -274,5 +276,55 @@ func TestStatusWithNoRefsRunsNoGit(t *testing.T) {
 	}
 	if in.Main != "abc" {
 		t.Errorf("main %q", in.Main)
+	}
+}
+
+// lego logs through its own logger; after setup it must land in the same stream, in the same format, redacted.
+func TestLegoLogGoesThroughTheLogger(t *testing.T) {
+	t.Cleanup(logx.ResetSecrets)
+	prevLego := legolog.Logger
+	t.Cleanup(func() { legolog.Logger = prevLego })
+	const token = "cf-token-for-lego-0123456789"
+	logx.AddSecret(token)
+	for _, format := range []string{"text", "json"} {
+		var out, errb bytes.Buffer
+		c := &cli{stdout: &out, stderr: &errb, now: func() time.Time { return fixedNow }}
+		prev := slog.Default()
+		if code := runCLI(c, []string{"--log-format", format, "--log-level", "debug", "version"}); code != 0 {
+			t.Fatalf("exit %d", code)
+		}
+		legolog.Infof("[a.example.org] presenting with %s", token)
+		legolog.Warnf("[a.example.org] retry")
+		slog.SetDefault(prev)
+		got := errb.String()
+		if strings.Contains(got, token) || !strings.Contains(got, "[redacted]") || !strings.Contains(got, "retry") {
+			t.Errorf("%s: lego output not captured and redacted:\n%s", format, got)
+		}
+		if format == "json" && !strings.HasPrefix(got, "{") {
+			t.Errorf("lego output is not JSON: %s", got)
+		}
+	}
+}
+
+func TestStatusWarningNamesTheReplacementThatKeepsScriptsWorking(t *testing.T) {
+	_, warns, _ := rewriteLegacyFlags([]string{"status", "-config", "c.json", "-no-refs"})
+	if len(warns) < 1 || !strings.Contains(warns[0], "--config <file> -o json") || !strings.Contains(warns[0], "--format legacy") ||
+		!strings.Contains(warns[0], "JSON keys change") || !strings.Contains(warns[0], migrationNote) {
+		t.Errorf("status warning: %v", warns)
+	}
+	_, warns, _ = rewriteLegacyFlags([]string{"iplist-history", "-config", "c.json", "edge"})
+	if len(warns) != 1 || strings.Contains(warns[0], "-o json") {
+		t.Errorf("other commands get the plain advice: %v", warns)
+	}
+}
+
+// Only flags on the command line choose the old default; the environment does not.
+func TestLegacyDefaultIgnoresTheEnvironment(t *testing.T) {
+	h := newHub(t)
+	h.markMirrored(t)
+	t.Setenv("INFRA_HUB_OUTPUT", "json")
+	_, out, _ := run(t, "status", "-config", h.config, "--no-refs")
+	if !strings.Contains(out, `"mirror_age_seconds"`) {
+		t.Errorf("INFRA_HUB_OUTPUT switched the old default away: %s", out)
 	}
 }

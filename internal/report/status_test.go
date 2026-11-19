@@ -74,13 +74,13 @@ func golden(t *testing.T, name string, v any) {
 	}
 }
 
-func TestStatusGoldenV1(t *testing.T)     { golden(t, "status-v1.json", NewStatus(fixture())) }
-func TestStatusGoldenLegacy(t *testing.T) { golden(t, "status-legacy.json", Legacy(fixture())) }
+func TestStatusGoldenV1(t *testing.T) { golden(t, "status-v1.json", NewStatus(fixture())) }
+
+// The legacy document is checked against the real output of origin/main in internal/app (legacy_golden_test.go).
 
 func TestStatusGoldenEmpty(t *testing.T) {
 	in := StatusInput{Now: time.Date(2026, 11, 19, 8, 20, 33, 0, time.UTC), Issuer: "disabled"}
 	golden(t, "status-empty-v1.json", NewStatus(in))
-	golden(t, "status-empty-legacy.json", Legacy(in))
 }
 
 // The new document follows the conventions: apiVersion, lower camelCase keys, no maps keyed by data, no null.

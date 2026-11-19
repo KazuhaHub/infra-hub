@@ -9,7 +9,7 @@ var (
 	Version = "dev"
 	// Commit is the short commit hash the binary was built from.
 	Commit = "unknown"
-	// Date is the build date, YYYY-MM-DD, UTC.
+	// Date is the date of the commit that was built, YYYY-MM-DD, UTC.
 	Date = "unknown"
 )
 
