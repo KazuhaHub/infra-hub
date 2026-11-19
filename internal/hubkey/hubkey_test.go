@@ -42,7 +42,7 @@ func TestReadRefusals(t *testing.T) {
 	loose := filepath.Join(dir, "loose")
 	data, _ := Marshal(k)
 	os.WriteFile(loose, data, 0o644)
-	if _, err := Read(loose); err == nil || !strings.Contains(err.Error(), "0600") {
+	if _, err := Read(loose); err == nil || !strings.Contains(err.Error(), "0600 or 0400") {
 		t.Errorf("loose mode: %v", err)
 	}
 	for name, content := range map[string]string{"garbage": "hello", "empty": "", "wrong type": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"} {

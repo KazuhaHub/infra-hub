@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net/netip"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/KazuhaHub/infra-hub/internal/hubtrust"
@@ -70,10 +71,18 @@ func WriteNew(path string, key ed25519.PrivateKey) error {
 	return nil
 }
 
-// Read reads a PKCS#8 PEM Ed25519 key. The file is opened once and everything is checked on that handle: it must be
-// a regular file that group and others cannot read.
+// Read reads a PKCS#8 PEM Ed25519 key. The path (after following a symlink) must be a regular file, which is checked
+// before it is opened so that a FIFO or device cannot block the hub; the file is then opened without blocking, it must
+// be the same file, and its mode is checked on the open handle: no access for group or others.
 func Read(path string) (ed25519.PrivateKey, error) {
-	f, err := os.Open(path)
+	before, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -82,11 +91,11 @@ func Read(path string) (ed25519.PrivateKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !st.Mode().IsRegular() {
-		return nil, fmt.Errorf("%s is not a regular file", path)
+	if !st.Mode().IsRegular() || !os.SameFile(before, st) {
+		return nil, fmt.Errorf("%s changed while it was being opened", path)
 	}
 	if st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%s is readable by others (mode %v); it must be 0600", path, st.Mode().Perm())
+		return nil, fmt.Errorf("%s is accessible by group or others (mode %v); it must be 0600 or 0400 (no group or other access)", path, st.Mode().Perm())
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 64<<10))
 	if err != nil {

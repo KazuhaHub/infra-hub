@@ -20,7 +20,8 @@
 - The agent-side trust is now a list of key pins instead of a CA pin. A hub whose identity key cannot be read logs an
   error, serves no HTTPS and keeps serving SSH.
 - `https.cert` and `https.caCert` are ignored for one release, with a warning that names `https.key`; delete them from
-  the config.
+  the config. A v0.3.0 `https` block (`listen`, `cert`, `caCert`, no `key`) still loads: the hub warns that the old
+  fields are ignored and that HTTPS is off until `https.key` is set, and keeps serving SSH.
 
 ### Removed
 

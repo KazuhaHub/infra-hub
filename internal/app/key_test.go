@@ -128,11 +128,11 @@ func TestOldConfigFieldsAreIgnored(t *testing.T) {
 	data, _ := os.ReadFile(h.config)
 	json.Unmarshal(data, &cfg)
 	cfg["httpsAddresses"] = []string{"192.0.2.10"}
-	cfg["https"] = map[string]any{"listen": "192.0.2.10:8443", "key": "/etc/infra-hub/hub.key", "caCert": "/etc/infra-hub/ca.crt", "cert": "/etc/infra-hub/hub.crt"}
+	cfg["https"] = map[string]any{"listen": "192.0.2.10:8443", "caCert": "/etc/infra-hub/ca.crt", "cert": "/etc/infra-hub/hub.crt"}
 	data, _ = json.Marshal(cfg)
 	os.WriteFile(h.config, data, 0o600)
 	code, _, errs := run(t, "status", "--config", h.config, "--no-refs")
-	if code != 0 || !strings.Contains(errs, "https.key") {
+	if code != 0 || !strings.Contains(errs, "https.key") || !strings.Contains(errs, "https is off") {
 		t.Errorf("old config: %d %q", code, errs)
 	}
 }

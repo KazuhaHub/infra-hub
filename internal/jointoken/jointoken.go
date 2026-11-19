@@ -2,6 +2,9 @@
 // the compact JSON {"v":1,"pins":["sha256//..."],"hubs":["https://host:port",...]}.
 //
 // A token holds no secret: only the public pins of the hub identity key and the hubs' URLs.
+//
+// The canonical form that Decode requires is exactly Go's json.Marshal encoding of Token (field order v, pins, hubs; no
+// white space; HTML characters escaped as encoding/json does).
 package jointoken
 
 import (
@@ -117,13 +120,17 @@ func (t Token) validate() error {
 	return nil
 }
 
-// ValidateHubURL accepts only https://host or https://host:port (port 1-65535), with no user, path (not even a
-// trailing slash), query or fragment.
+// ValidateHubURL accepts only https://host or https://host:port, where host is an IP address or a lower-case DNS name
+// (the rule of httpsAddresses) and the port is 1-65535. A user, a path (not even a trailing slash), a query, a
+// fragment (also an empty one) and anything else is refused.
 func ValidateHubURL(s string) error {
 	bad := fmt.Errorf("hub %q must look like https://host:port", s)
+	if strings.ContainsAny(s, "#?@\\ \t\r\n") {
+		return bad
+	}
 	u, err := url.Parse(s)
-	if err != nil || u.Scheme != "https" || u.Host == "" || u.Hostname() == "" || u.User != nil || u.Path != "" ||
-		u.RawPath != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || strings.HasSuffix(u.Host, ":") {
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Path != "" || u.RawPath != "" || u.RawQuery != "" ||
+		u.ForceQuery || u.Fragment != "" || u.Opaque != "" || strings.HasSuffix(u.Host, ":") || !hubtrust.ValidAddress(u.Hostname()) {
 		return bad
 	}
 	if p := u.Port(); p != "" {

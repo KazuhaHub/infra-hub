@@ -78,6 +78,15 @@ func TestDecodeRefusals(t *testing.T) {
 		"port 65536":         hub("https://h:65536"),
 		"port text":          hub("https://h:abc"),
 		"port leading zero":  hub("https://h:08443"),
+		"upper-case host":    hub("https://Hub.Example.org:1"),
+		"underscore host":    hub("https://a_b.example.org:1"),
+		"wildcard host":      hub("https://*.example.org:1"),
+		"zoned IPv6":         hub("https://[fe80::1%25eth0]:1"),
+		"empty fragment":     hub("https://h:1#"),
+		"fragment":           hub("https://h:1#x"),
+		"empty query":        hub("https://h:1?"),
+		"at sign":            hub("https://h:1@h2:2"),
+		"space":              hub("https://h :1"),
 		"too long":           "ih1." + strings.Repeat("A", 20000),
 	}
 	for name, tok := range cases {

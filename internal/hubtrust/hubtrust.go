@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
+	"regexp"
 	"strings"
 )
 
@@ -52,6 +54,17 @@ func ParsePin(pin string) ([sha256.Size]byte, error) {
 	}
 	copy(out[:], raw)
 	return out, nil
+}
+
+var dnsNameRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// ValidAddress reports whether a is an IP address (without a zone) or a plain lower-case DNS name (no wildcard, no
+// trailing dot): the rule for a hub's address in the config (httpsAddresses) and in a join token.
+func ValidAddress(a string) bool {
+	if ip, err := netip.ParseAddr(a); err == nil {
+		return ip.Zone() == ""
+	}
+	return dnsNameRe.MatchString(a)
 }
 
 // Verifier checks the certificate a hub presents.

@@ -180,6 +180,20 @@ func TestConfigClientsAndHTTPS(t *testing.T) {
 			t.Errorf("%s: no warning naming https.key: %q", old, logs.String())
 		}
 	}
+	// The exact v0.3.0 shape (a listener, cert and caCert, no key) loads with HTTPS off and a warning that says so.
+	{
+		var logs bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+		c, err := parse(clients, `,"httpsAddresses":["192.0.2.10","hub.example.org"],"https":{"listen":"192.0.2.10:8443","cert":"/etc/infra-hub/hub.crt","caCert":"/etc/infra-hub/ca.crt"}`)
+		slog.SetDefault(prev)
+		if err != nil || c.HTTPS.Listen != "" || c.HTTPS.Key != "" || len(c.HTTPSAddresses) != 2 {
+			t.Fatalf("v0.3.0 https block: %+v %v", c.HTTPS, err)
+		}
+		if out := logs.String(); !strings.Contains(out, "https.cert") || !strings.Contains(out, "https.caCert") || !strings.Contains(out, "https is off until https.key is set") {
+			t.Errorf("warnings: %q", out)
+		}
+	}
 	// Only the old fields, no key: still starts (HTTPS then needs https.key and is refused as before for listen).
 	if _, err := parse(clients, `,"https":{"caCert":"/a","cert":"/b"}`); err != nil {
 		t.Errorf("old fields without listen: %v", err)

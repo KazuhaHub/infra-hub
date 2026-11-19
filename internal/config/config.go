@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/netip"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -18,11 +16,9 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
+	"github.com/KazuhaHub/infra-hub/internal/hubtrust"
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
 )
-
-// dnsNameRe is a plain, lower-case DNS name (no wildcard, no trailing dot).
-var dnsNameRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // repoName is the only repository the hub serves; clients use ssh://infra@<hub>:<port>/infra.git.
 const repoName = "infra.git"
@@ -166,11 +162,22 @@ func normalizeKeys(data []byte) ([]byte, error) {
 	if raw, ok := top["https"]; ok {
 		var h map[string]json.RawMessage
 		if json.Unmarshal(raw, &h) == nil {
+			removed := false
 			for _, old := range []string{"caCert", "cert"} {
 				if _, ok := h[old]; ok {
 					slog.Warn("removed config key, ignored; delete it and use https.key (the hub identity key)", "key", "https."+old)
 					delete(h, old)
+					removed = true
 				}
+			}
+			// A v0.3.0 block has a listener and no key: it cannot serve without the identity key, but the hub (and
+			// SSH) must still start.
+			var key string
+			_ = json.Unmarshal(h["key"], &key)
+			if _, hasListen := h["listen"]; removed && hasListen && key == "" {
+				slog.Warn("https is off until https.key is set to the hub identity key", "key", "https.listen")
+				delete(h, "listen")
+				delete(h, "key")
 			}
 			out, err := json.Marshal(h)
 			if err != nil {
@@ -297,7 +304,7 @@ func (c *Config) checkHTTPS() error {
 	}
 	seen := map[string]bool{}
 	for _, a := range c.HTTPSAddresses {
-		if ip, err := netip.ParseAddr(a); (err != nil && !dnsNameRe.MatchString(a)) || (err == nil && ip.Zone() != "") {
+		if !hubtrust.ValidAddress(a) {
 			return fmt.Errorf("config: httpsAddresses: %q is neither an IP address nor a plain lower-case DNS name", a)
 		}
 		if seen[a] {

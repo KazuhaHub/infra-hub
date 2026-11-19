@@ -210,9 +210,17 @@ func TestResumedSessionIsCheckedAgainstTheCurrentPins(t *testing.T) {
 		}
 	}()
 	cache := tls.NewLRUClientSessionCache(4)
+	var lastVerifyResumed bool
 	dial := func(pin string) (resumed bool, err error) {
 		cfg := Verifier{Pins: []string{pin}}.TLSConfig()
 		cfg.ClientSessionCache = cache
+		inner := cfg.VerifyConnection
+		var sawResume bool
+		cfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			sawResume = cs.DidResume
+			return inner(cs)
+		}
+		defer func() { lastVerifyResumed = sawResume }()
 		conn, err := tls.Dial("tcp", ln.Addr().String(), cfg)
 		if err != nil {
 			return false, err
@@ -231,5 +239,8 @@ func TestResumedSessionIsCheckedAgainstTheCurrentPins(t *testing.T) {
 	}
 	if _, err := dial(keyPin(t, newKey(t))); err == nil {
 		t.Error("a session was resumed with a hub whose key is no longer pinned")
+	}
+	if !lastVerifyResumed {
+		t.Error("the refused handshake was not a resumption: the test does not show that resumed sessions are checked")
 	}
 }
