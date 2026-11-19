@@ -137,6 +137,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 		} else {
 			slog.Info("https identity", "pin", pin)
 			hs := httpsapi.NewServer(cfg.AgeRecipients(), st)
+			hs.Bundles = &httpsapi.Bundles{Repo: cfg.Repo, Fresh: func() error { return mirror.Fresh(time.Duration(cfg.MaxStaleSeconds) * time.Second) }}
 			run := &httpsapi.Runner{Key: key, Addresses: cfg.HTTPSAddresses, Listen: cfg.HTTPS.Listen, Server: hs}
 			go run.Run(ctx)
 		}

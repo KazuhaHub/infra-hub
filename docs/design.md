@@ -7,7 +7,8 @@ the next changes build towards.
 | --- | --- | --- |
 | 1 | Hub side: hub identity key and token, HTTPS, `/v1/healthz`, `/v1/challenge`, `/v1/report`, reports in `status` | done |
 | 2 | `infra-agent`: challenge-response client, report sender, polling | open |
-| 3 | `/v1/bundle`, certificates and IP lists over HTTPS, install script, kick, self-update | open |
+| 3a | Hub side of `GET /v1/bundle/<host>` (format in [bundle.md](bundle.md)) | done |
+| 3 | Agent side of the bundle, certificates and IP lists over HTTPS, install script, kick, self-update | open |
 | 4 | Hub key rotation across agents, SSH removed | open |
 
 ## Goals
@@ -28,8 +29,12 @@ the next changes build towards.
 ## infra to machine
 
 - **Config bundle.** A tarball of the attested commit of the infra repository, signed by infra's CI
-  (`ssh-keygen -Y sign` attestation, namespace `infra-main`, as today) and encrypted with age to the machines that may
-  read it. A machine verifies the signature before it applies anything and only moves forward.
+  (`ssh-keygen -Y sign`, namespace `infra-bundle`; the attestation itself keeps `infra-main`) and encrypted with age
+  to the machine that fetches it. A machine verifies the signature before it applies anything and only moves forward.
+  The format is in [bundle.md](bundle.md). Implemented in phase 3a: `GET /v1/bundle/<host>` reads `bundle`,
+  `bundle.sig` and `bundle.tar.gz` from the tip of `main-attestation` in the mirror, takes the commit from the
+  strictly parsed statement (it verifies neither signature nor hash: the hub is not trusted for integrity), and
+  answers an age-encrypted ustar of the three files with `ETag` and `304`, or `503 no_bundle` / `503 stale_mirror`.
 - **Certificates.** The machine generates its own private key and sends a CSR. The hub obtains the certificate with
   lego `ObtainForCSR` and returns only the public certificate chain. The hub never holds a machine's private key.
 - **IP lists.** Signed by a hub signing key whose public half is part of the signed bundle.

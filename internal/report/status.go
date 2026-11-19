@@ -28,6 +28,15 @@ type StatusInput struct {
 	Issuer            string
 	Certs             map[string]certs.CertStatus
 	IPLists           *iplists.IPStatus
+	Bundle            *BundleInput // nil: not examined (status --no-refs)
+}
+
+// BundleInput is what the hub would serve at /v1/bundle right now: a commit and time, or the reason it serves none.
+type BundleInput struct {
+	Commit  string
+	Time    time.Time
+	Reason  string // no_bundle or stale_mirror, when nothing is served
+	Message string
 }
 
 // Status is `infra-hub status -o json`.
@@ -42,6 +51,17 @@ type Status struct {
 	Issuer            string   `json:"issuer"`
 	Certs             []Cert   `json:"certs"`
 	IPLists           *IPLists `json:"iplists,omitempty"`
+	Bundle            *Bundle  `json:"bundle,omitempty"`
+}
+
+// Bundle is the config bundle the hub serves: served with its commit and statement time, or not served with the
+// error code a host would get and a message for people.
+type Bundle struct {
+	Served  bool   `json:"served"`
+	Commit  string `json:"commit,omitempty"`
+	Time    string `json:"time,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Message string `json:"message,omitempty"`
 }
 
 // Host is one configured client; lastSeen is omitted for a host that has never fetched.
@@ -154,6 +174,9 @@ func NewStatus(in StatusInput) Status {
 		c := in.Certs[name]
 		out.Certs = append(out.Certs, Cert{Name: name, Owner: c.Owner, NotAfter: str(c.NotAfter), LastAttempt: str(c.LastAttempt),
 			LastResult: c.LastResult, LastError: c.LastError, Failures: c.Failures, Failing: c.Failing, NextAttempt: str(c.NextAttempt)})
+	}
+	if b := in.Bundle; b != nil {
+		out.Bundle = &Bundle{Served: b.Reason == "", Commit: b.Commit, Time: Time(b.Time), Reason: b.Reason, Message: b.Message}
 	}
 	if in.IPLists != nil {
 		ip := &IPLists{Providers: []Provider{}, Lists: []List{}}
