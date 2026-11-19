@@ -1,0 +1,37 @@
+{
+  "apiVersion": "v1",
+  "list": "edge",
+  "entries": [
+    {
+      "time": "2026-11-01T00:00:00Z",
+      "event": "first fetch",
+      "provider": "cloudflare",
+      "version": "aaaa",
+      "previousVersion": "",
+      "added": [
+        "192.0.2.0/24"
+      ],
+      "removed": [],
+      "addedCount": 1,
+      "removedCount": 0,
+      "countBefore": 0,
+      "countAfter": 1
+    },
+    {
+      "time": "2026-11-19T08:10:00Z",
+      "event": "held",
+      "provider": "cloudflare",
+      "version": "aaaa",
+      "previousVersion": "aaaa",
+      "added": [],
+      "removed": [
+        "192.0.2.0/24"
+      ],
+      "addedCount": 0,
+      "removedCount": 1,
+      "countBefore": 1,
+      "countAfter": 0,
+      "reason": "shrank by 100%"
+    }
+  ]
+}

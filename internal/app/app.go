@@ -1,215 +1,184 @@
-// Package app wires the hub: the subcommands of cmd/infra-hub.
+// Package app is the command line of cmd/infra-hub: the cobra commands and the wiring of the hub's parts.
 package app
 
 import (
-	"context"
-	"encoding/json"
-	"flag"
+	"errors"
 	"fmt"
-	"log"
-	"net"
+	"io"
+	"log/slog"
 	"os"
-	"os/signal"
-	"path/filepath"
-	"syscall"
+	"strings"
 	"time"
 
-	"github.com/KazuhaHub/infra-hub/internal/certs"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+
 	"github.com/KazuhaHub/infra-hub/internal/config"
-	"github.com/KazuhaHub/infra-hub/internal/gitmirror"
-	"github.com/KazuhaHub/infra-hub/internal/iplists"
-	"github.com/KazuhaHub/infra-hub/internal/sshserver"
-	"github.com/KazuhaHub/infra-hub/internal/state"
+	"github.com/KazuhaHub/infra-hub/internal/logx"
+	"github.com/KazuhaHub/infra-hub/internal/version"
 )
 
-// Main runs the hub command line (os.Args).
-func Main() {
-	if len(os.Args) < 2 {
-		usage()
-	}
-	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
-	configPath := fs.String("config", "/etc/infra-hub/config.json", "config file")
-	noRefs := fs.Bool("no-refs", false, "status: do not read the git mirror (no git is run)")
-	limit := fs.Int("limit", 0, "iplist-history: only the newest N entries")
-	// Flags may come before or after the one positional argument: infra-hub iplist-history cloudflare --limit 20
-	var pos []string
-	for args := os.Args[2:]; ; {
-		fs.Parse(args)
-		if fs.NArg() == 0 {
-			break
-		}
-		pos = append(pos, fs.Arg(0))
-		args = fs.Args()[1:]
-	}
-	cfg, err := config.LoadConfig(*configPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	switch os.Args[1] {
-	case "serve":
-		log.SetFlags(0) // journald adds the time
-		if err := serve(cfg); err != nil {
-			log.Fatal(err)
-		}
-	case "status":
-		if err := status(cfg, os.Stdout, *noRefs); err != nil {
-			log.Fatal(err)
-		}
-	case "iplist-history":
-		if len(pos) != 1 {
-			usage()
-		}
-		name := pos[0]
-		if err := iplists.HistoryReport(cfg.IPListDir, cfg.IPLists, name, *limit, os.Stdout); err != nil {
-			log.Fatal(err)
-		}
-	case "iplist-accept":
-		if len(pos) != 1 {
-			usage()
-		}
-		if err := iplists.AcceptReport(cfg.IPListDir, cfg.IPSources, pos[0], os.Stdout); err != nil {
-			log.Fatal(err)
-		}
-	default:
-		usage()
-	}
+// Exit codes (docs/conventions.md); there are no others.
+const (
+	ExitOK       = 0
+	ExitFailed   = 1 // the operation failed
+	ExitUsage    = 2 // bad flag or argument
+	ExitNotReady = 3 // not ready, try again
+)
+
+const (
+	program       = "infra-hub"
+	envPrefix     = "INFRA_HUB_"
+	defaultConfig = "/etc/infra-hub/config.json"
+)
+
+// exitError ends the command with a code. A message is printed to stderr as one line; an empty one prints nothing
+// (the command has already written its output).
+type exitError struct {
+	code int
+	err  error
 }
 
-func usage() {
-	fmt.Fprintln(os.Stderr, "usage: infra-hub serve|status [-config file] [-no-refs] | infra-hub iplist-accept [-config file] <provider> | infra-hub iplist-history [-config file] <list> [--limit N]")
-	os.Exit(2)
+func (e *exitError) Error() string {
+	if e.err == nil {
+		return fmt.Sprintf("exit status %d", e.code)
+	}
+	return e.err.Error()
+}
+func (e *exitError) Unwrap() error { return e.err }
+
+func usageErrorf(format string, a ...any) error {
+	return &exitError{code: ExitUsage, err: fmt.Errorf(format, a...)}
 }
 
-func serve(cfg config.Config) error {
-	keys, err := cfg.ClientKeys()
-	if err != nil {
-		return err
-	}
-	signer, err := sshserver.LoadOrCreateHostKey(cfg.HostKey)
-	if err != nil {
-		return err
-	}
-	state, err := state.LoadState(cfg.State)
-	if err != nil {
-		log.Printf("starting with an empty state: %v", err)
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+// cli carries what the commands share: the output streams, the clock and what the old spellings switched on.
+type cli struct {
+	stdout, stderr io.Writer
+	now            func() time.Time
+	// legacyConfig: the command line used the old `-config` spelling, so `status` keeps printing the old JSON unless
+	// a format is asked for. It is what the deployed timer of the private infra repository does today.
+	legacyConfig bool
+}
 
-	mirror := &gitmirror.Mirror{Repo: cfg.Repo, Upstream: cfg.Upstream, Interval: time.Duration(cfg.MirrorIntervalSeconds) * time.Second,
-		OnSuccess: state.SetMirrorSuccess}
-	go mirror.Run(ctx)
-	go func() { // throttled state writes
-		t := time.NewTicker(15 * time.Second)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				if err := state.Flush(); err != nil {
-					log.Printf("state: %v", err)
-				}
+// Main runs the hub command line (os.Args[1:]) and returns the process exit code.
+func Main(args []string, stdout, stderr io.Writer) int {
+	return runCLI(&cli{stdout: stdout, stderr: stderr, now: time.Now}, args)
+}
+
+func runCLI(c *cli, args []string) int {
+	stdout, stderr := c.stdout, c.stderr
+	args, warnings, legacyConfig := rewriteLegacyFlags(args)
+	c.legacyConfig = legacyConfig
+	for _, w := range warnings {
+		fmt.Fprintf(stderr, "%s: warning: %s\n", program, w)
+	}
+	root := c.newRoot()
+	root.SetArgs(args)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	err := root.Execute()
+	if err == nil {
+		return ExitOK
+	}
+	var ee *exitError
+	if errors.As(err, &ee) {
+		if ee.err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", program, ee.err)
+		}
+		return ee.code
+	}
+	fmt.Fprintf(stderr, "%s: %v\n", program, err)
+	return ExitFailed
+}
+
+func (c *cli) newRoot() *cobra.Command {
+	root := &cobra.Command{
+		Use:   program,
+		Short: "The hub: git mirror, certificates and IP lists for a fleet of machines",
+		Long: "infra-hub mirrors the configuration repository, issues certificates and collects IP lists for the machines in its config.\n\n" +
+			"Every flag can also be set with an environment variable: " + envPrefix + " plus the flag name in upper case with dashes as\nunderscores (--log-level is " + envPrefix + "LOG_LEVEL).",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		Version:       version.String(program),
+		Args:          usageArgs(cobra.NoArgs),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return usageErrorf("a command is required (try %s --help)", program)
+		},
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			if err := applyEnv(cmd.Flags()); err != nil {
+				return &exitError{code: ExitUsage, err: err}
 			}
-		}
-	}()
-	defer func() {
-		if err := state.Flush(); err != nil {
-			log.Printf("state: %v", err)
-		}
-	}()
+			return c.setupLogging(cmd)
+		},
+	}
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.SetVersionTemplate("{{.Version}}\n")
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error { return &exitError{code: ExitUsage, err: err} })
+	root.PersistentFlags().String("config", defaultConfig, "path to the hub's config file")
+	root.PersistentFlags().String("log-format", "text", "log format on stderr: text or json")
+	root.PersistentFlags().String("log-level", "info", "log level: debug, info, warn or error")
+	root.AddCommand(c.newServe(), c.newStatus(), c.newIPList(), c.newVersion(), c.newLegacyIPListAccept(), c.newLegacyIPListHistory())
+	return root
+}
 
-	ln, err := net.Listen("tcp", cfg.Listen)
-	if err != nil {
-		return err
-	}
-	var certMgr *certs.CertManager
-	issuing := false
-	if len(cfg.Certs) > 0 {
-		certMgr = &certs.CertManager{Store: certs.CertStore{Dir: cfg.CertDir}, Owners: cfg.Certs}
-		tokenPath := cfg.CloudflareTokenFile
-		if tokenPath == "" {
-			tokenPath = filepath.Join(os.Getenv("CREDENTIALS_DIRECTORY"), "cf_token")
+// usageArgs makes an argument error a usage error (exit code 2).
+func usageArgs(v cobra.PositionalArgs) cobra.PositionalArgs {
+	return func(cmd *cobra.Command, args []string) error {
+		if err := v(cmd, args); err != nil {
+			return &exitError{code: ExitUsage, err: err}
 		}
-		if token, err := certs.ReadToken(tokenPath); err != nil {
-			// Serving what is already stored still works; only issuing and renewing is off.
-			log.Printf("certificates: not issuing, no Cloudflare token: %v", err)
-		} else {
-			certMgr.Issuer = &certs.LegoIssuer{Directory: cfg.AcmeDirectory, Email: cfg.AcmeEmail, Dir: filepath.Join(cfg.CertDir, "account"), CFToken: token}
-			issuing = true
-		}
+		return nil
 	}
-	if len(cfg.Certs) > 0 {
-		if err := certMgr.Store.SetIssuerState(issuing); err != nil {
-			log.Printf("certificates: %v", err)
-		}
-	}
+}
 
-	var ipm *iplists.IPManager
-	if len(cfg.IPLists) > 0 {
-		ipm = newIPManager(cfg)
-		go ipm.Run(ctx) // refreshes the providers and applies accepted changes
-	}
-
-	log.Printf("listening on %s, host key %s, %d clients", ln.Addr(), sshserver.SignerFingerprint(signer.PublicKey()), len(keys))
-	if issuing {
-		go certMgr.Run(ctx) // only once the listener is up
-	}
-	srv := sshserver.NewServer(sshserver.NewSSHKeyIdentifier(keys), state, signer, cfg.Repo, func(ctx context.Context) (map[string]string, error) {
-		return gitmirror.ReadRefs(ctx, cfg.Repo)
+// applyEnv fills flags that were not given on the command line from INFRA_HUB_<NAME>.
+func applyEnv(fs *pflag.FlagSet) error {
+	var err error
+	fs.VisitAll(func(f *pflag.Flag) {
+		if f.Changed || err != nil || f.Name == "help" || f.Name == "version" {
+			return
+		}
+		name := envPrefix + strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
+		if v, ok := os.LookupEnv(name); ok && v != "" {
+			if e := f.Value.Set(v); e != nil {
+				err = fmt.Errorf("%s=%q: %w", name, v, e)
+				return
+			}
+			f.Changed = true
+		}
 	})
-	if certMgr != nil {
-		srv.Certs = certMgr
-	}
-	if ipm != nil {
-		srv.IPLists = ipm
-	}
-	maxStale := time.Duration(cfg.MaxStaleSeconds) * time.Second
-	srv.Fresh = func() error { return mirror.Fresh(maxStale) }
-	return srv.Serve(ctx, ln)
+	return err
 }
 
-// status prints what a monitor reads: the mirror's refs and age, and per host the last time it fetched.
-// Mirror age is the time of the last successful fetch from upstream, which the running hub records in the state file.
-func status(cfg config.Config, w *os.File, noRefs bool) error {
-	st, err := state.LoadState(cfg.State)
+// setupLogging installs the slog logger (stderr). It is also the default logger, which carries the standard
+// library's log package (used by the ACME library) to the same place.
+func (c *cli) setupLogging(cmd *cobra.Command) error {
+	format, _ := cmd.Flags().GetString("log-format")
+	level, _ := cmd.Flags().GetString("log-level")
+	logger, err := logx.New(c.stderr, format, level)
 	if err != nil {
-		return err
+		return &exitError{code: ExitUsage, err: err}
 	}
-	refs := map[string]string{} // -no-refs: a root caller (the hourly mailer) must not run git in the hub user's repository
-	if !noRefs {
-		refs, _ = gitmirror.ReadRefs(context.Background(), cfg.Repo)
-	}
-	out := struct {
-		Time              string                      `json:"time"`
-		Main              string                      `json:"main"`
-		MainAttestation   string                      `json:"main_attestation"`
-		MirrorLastSuccess *string                     `json:"mirror_last_success"`
-		MirrorAge         *int64                      `json:"mirror_age_seconds"`
-		Hosts             map[string]state.NodeRecord `json:"hosts"`
-		Issuer            string                      `json:"issuer"`
-		Certs             map[string]certs.CertStatus `json:"certs"`
-		IPLists           *iplists.IPStatus           `json:"iplists,omitempty"`
-	}{Issuer: certs.CertStore{Dir: cfg.CertDir}.IssuerState(), Certs: certs.CertStore{Dir: cfg.CertDir}.Status(cfg.Certs), Time: time.Now().UTC().Format(time.RFC3339), Main: refs["refs/heads/main"], MainAttestation: refs["refs/heads/main-attestation"], Hosts: map[string]state.NodeRecord{}}
-	if t := st.MirrorSuccess(); !t.IsZero() {
-		age := int64(time.Since(t).Seconds())
-		out.MirrorAge = &age
-		ts := t.Format(time.RFC3339)
-		out.MirrorLastSuccess = &ts
-	}
-	if len(cfg.IPLists) > 0 {
-		ips := newIPManager(cfg).Status()
-		out.IPLists = &ips
-	}
-	snap := st.Snapshot()
-	for name := range cfg.Clients { // every configured host appears, seen or not
-		out.Hosts[name] = snap[name]
-	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	slog.SetDefault(logger)
+	return nil
 }
 
-func newIPManager(cfg config.Config) *iplists.IPManager {
-	return &iplists.IPManager{Dir: cfg.IPListDir, Sources: cfg.IPSources, Lists: cfg.IPLists}
+func (c *cli) loadConfig(cmd *cobra.Command) (config.Config, error) {
+	path, _ := cmd.Flags().GetString("config")
+	cfg, err := config.LoadConfig(path)
+	if err != nil {
+		return cfg, fmt.Errorf("load config %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func (c *cli) newVersion() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the version",
+		Args:  usageArgs(cobra.NoArgs),
+		Run: func(cmd *cobra.Command, _ []string) {
+			fmt.Fprintln(c.stdout, version.String(program))
+		},
+	}
 }

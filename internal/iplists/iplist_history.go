@@ -3,7 +3,7 @@ package iplists
 import (
 	"bytes"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -14,7 +14,7 @@ import (
 
 // Change history of the IP lists: one JSON line per event in <iplist_dir>/history/<list>.jsonl, newest last. It records
 // every change of what a list serves (first fetch, provider update, accept) and every held update, with the entries
-// added and removed. A monitor can read it later (`infra-hub iplist-history`, and the last few entries in `infra-hub status`).
+// added and removed. A monitor can read it later (`infra-hub iplist history`, and the last few entries in `infra-hub status`).
 
 const (
 	// HistoryMax is how many entries a list keeps. The file is appended to; when it holds HistoryMax+HistorySlack lines
@@ -161,7 +161,7 @@ func (m *IPManager) listsBefore(provider string) map[string][]string {
 func (m *IPManager) appendHistory(list string, e HistoryEntry) {
 	e.Time = m.now().UTC().Format(time.RFC3339)
 	if err := AppendHistory(m.Dir, list, e); err != nil {
-		log.Printf("iplist %s: cannot write the history: %v", list, err)
+		slog.Error("cannot write the history", "list", list, "err", err)
 	}
 }
 

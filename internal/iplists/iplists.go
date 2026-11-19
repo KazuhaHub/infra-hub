@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"os"
@@ -32,7 +32,7 @@ const (
 	// IPBackoffBase doubles per consecutive failure, up to the refresh interval.
 	IPBackoffBase = 15 * time.Minute
 	// Change guard: an update that removes more than GuardRemovePct or adds more than GuardAddPct (percent of the
-	// entries the provider had) is held until `infra-hub iplist-accept <provider>`.
+	// entries the provider had) is held until `infra-hub iplist accept <provider>`.
 	GuardRemovePct = 30
 	GuardAddPct    = 50
 	// A provider whose last success is older than StaleAfter, or that failed FailingAfterRuns times in a row, is
@@ -261,7 +261,7 @@ func (m *IPManager) Refresh(ctx context.Context, name string) {
 	defer m.mu.Unlock()
 	st, lerr := loadProvider(m.path(name))
 	if lerr != nil {
-		log.Printf("iplist %s: %v; not touching it, serving nothing new from it", name, lerr)
+		slog.Error("provider state unreadable, not touching it", "provider", name, "err", lerr)
 		return
 	}
 	before := m.listsBefore(name)
@@ -274,7 +274,7 @@ func (m *IPManager) Refresh(ctx context.Context, name string) {
 		st.Failures++
 		st.LastError = err.Error()
 		st.NextAttempt = now.Add(ipBackoff(st.Failures))
-		log.Printf("iplist %s: kept the last list (%d entries): %v", name, len(st.CIDRs), err)
+		slog.Warn("provider fetch failed, kept the last list", "provider", name, "entries", len(st.CIDRs), "err", err)
 	} else {
 		st.Failures, st.LastError = 0, ""
 		st.LastSuccess = now
@@ -284,22 +284,22 @@ func (m *IPManager) Refresh(ctx context.Context, name string) {
 			st.CIDRs, st.LastChange = cur, now
 			st.Held, st.Pending, st.HeldReason = false, nil, ""
 			cause = "first fetch"
-			log.Printf("iplist %s: first list, %d entries", name, len(cur))
+			slog.Info("first list stored", "provider", name, "entries", len(cur))
 		case sameStrings(cur, st.CIDRs):
 			st.Held, st.Pending, st.HeldReason = false, nil, ""
 		default:
 			if why, hold := guard(st.CIDRs, cur); hold {
 				st.Held, st.Pending, st.HeldReason = true, cur, why
-				log.Printf("iplist %s: HELD, %s; still serving %d entries; run `infra-hub iplist-accept %s` to apply", name, why, len(st.CIDRs), name)
+				slog.Warn("update held, still serving the last list", "provider", name, "reason", why, "entries", len(st.CIDRs), "hint", "infra-hub iplist accept "+name)
 			} else {
-				log.Printf("iplist %s: changed, %d -> %d entries", name, len(st.CIDRs), len(cur))
+				slog.Info("list changed", "provider", name, "from", len(st.CIDRs), "to", len(cur))
 				st.CIDRs, st.LastChange = cur, now
 				st.Held, st.Pending, st.HeldReason = false, nil, ""
 			}
 		}
 	}
 	if err := m.save(name, st); err != nil {
-		log.Printf("iplist %s: cannot save: %v", name, err)
+		slog.Error("cannot save provider state", "provider", name, "err", err)
 		return
 	}
 	_ = hadState
@@ -315,7 +315,7 @@ func (m *IPManager) acceptDir() string { return filepath.Join(m.Dir, "accept") }
 // (like /var/lib/private, which only root can traverse) and so prove that nothing is looked up by path afterwards.
 var afterRootOpen = func() {}
 
-// RequestAccept is what `infra-hub iplist-accept` does: it records which held update (by the version of its entries) a
+// RequestAccept is what `infra-hub iplist accept` does: it records which held update (by the version of its entries) a
 // person has reviewed. The running hub applies it on its next tick, so the hub is the only writer of provider files.
 //
 // Run as root it first opens the real state directory (the path usually runs through /var/lib/private, which only root
@@ -401,15 +401,15 @@ func (m *IPManager) applyAccepts() {
 		os.Remove(f)
 		st, err := loadProvider(m.path(name))
 		if err != nil || !st.Held || strings.TrimSpace(string(data)) != ListVersion(st.Pending) {
-			log.Printf("iplist %s: ignored an accept request that does not match the held update", name)
+			slog.Warn("ignored an accept request that does not match the held update", "provider", name)
 			continue
 		}
-		log.Printf("iplist %s: accepted, %d -> %d entries", name, len(st.CIDRs), len(st.Pending))
+		slog.Info("held update accepted", "provider", name, "from", len(st.CIDRs), "to", len(st.Pending))
 		before := m.listsBefore(name)
 		st.CIDRs, st.LastChange = st.Pending, m.now()
 		st.Held, st.Pending, st.HeldReason = false, nil, ""
 		if err := m.save(name, st); err != nil {
-			log.Printf("iplist %s: cannot save: %v", name, err)
+			slog.Error("cannot save provider state", "provider", name, "err", err)
 			continue
 		}
 		m.recordChange(name, before, "accept", st)
@@ -505,7 +505,7 @@ func (m *IPManager) warnings(l IPList) []string {
 			continue
 		}
 		if st.Held {
-			set[printable(fmt.Sprintf("held:%s update held (%s); the previous list is still served; see infra-hub iplist-accept", p, st.HeldReason))] = true
+			set[printable(fmt.Sprintf("held:%s update held (%s); the previous list is still served; see infra-hub iplist accept", p, st.HeldReason))] = true
 		}
 		if st.Failures >= FailingAfterRuns {
 			set[printable(fmt.Sprintf("failing:%s %d attempts in a row (%s)", p, st.Failures, st.LastError))] = true
@@ -580,7 +580,7 @@ type ProviderStatus struct {
 	LastError   string  `json:"last_error,omitempty"`
 	Failures    int     `json:"failures"`
 	NextAttempt *string `json:"next_attempt,omitempty"`
-	// Held: an update is waiting for `infra-hub iplist-accept <provider>`; the old list is still served.
+	// Held: an update is waiting for `infra-hub iplist accept <provider>`; the old list is still served.
 	Held       bool   `json:"held"`
 	HeldReason string `json:"held_reason,omitempty"`
 	Pending    int    `json:"pending_count,omitempty"`
@@ -597,7 +597,7 @@ type ListStatus struct {
 	Entries   int      `json:"entries"` // 0 while a provider has not delivered
 	Version   string   `json:"version,omitempty"`
 	Warnings  []string `json:"warnings"`
-	// History is the last HistoryInStatus entries of the list's change history (`infra-hub iplist-history` has all).
+	// History is the last HistoryInStatus entries of the list's change history (`infra-hub iplist history` has all).
 	History []HistoryEntry `json:"history"`
 }
 

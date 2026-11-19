@@ -1,0 +1,105 @@
+{
+  "apiVersion": "v1",
+  "time": "2026-11-19T08:20:33Z",
+  "main": "1111111111111111111111111111111111111111",
+  "mainAttestation": "2222222222222222222222222222222222222222",
+  "mirrorLastSuccess": "2026-11-19T08:18:58Z",
+  "mirrorAgeSeconds": 95,
+  "hosts": [
+    {
+      "name": "app-1",
+      "lastSeen": "2026-11-19T08:20:23Z",
+      "main": "1111111111111111111111111111111111111111"
+    },
+    {
+      "name": "spare3"
+    },
+    {
+      "name": "web-2",
+      "lastSeen": "2026-11-19T08:17:33Z",
+      "main": "1111111111111111111111111111111111111111",
+      "mainAttestation": "2222222222222222222222222222222222222222"
+    }
+  ],
+  "issuer": "enabled",
+  "certs": [
+    {
+      "name": "a.example.org",
+      "owner": "app-1",
+      "lastAttempt": "2026-11-19T08:00:00Z",
+      "lastResult": "error",
+      "lastError": "dns timeout",
+      "failures": 3,
+      "failing": true,
+      "nextAttempt": "2026-11-19T12:00:00Z"
+    },
+    {
+      "name": "b.example.org",
+      "owner": "web-2",
+      "notAfter": "2027-01-17T00:00:00Z",
+      "lastAttempt": "2026-11-18T03:00:00Z",
+      "lastResult": "ok",
+      "failures": 0,
+      "failing": false
+    }
+  ],
+  "iplists": {
+    "providers": [
+      {
+        "name": "cloudflare",
+        "lastSuccess": "2026-11-19T08:10:00Z",
+        "count": 22,
+        "lastChange": "2026-11-19T08:10:00Z",
+        "failures": 0,
+        "held": true,
+        "heldReason": "grew by 60%",
+        "pendingCount": 36,
+        "failing": false
+      },
+      {
+        "name": "fastly",
+        "lastSuccess": "2026-11-19T08:10:00Z",
+        "count": 40,
+        "lastChange": "2026-11-01T00:00:00Z",
+        "failures": 0,
+        "held": false,
+        "failing": false
+      }
+    ],
+    "lists": [
+      {
+        "name": "edge",
+        "providers": [
+          "cloudflare",
+          "fastly"
+        ],
+        "manual": 1,
+        "hosts": [
+          "app-1",
+          "web-2"
+        ],
+        "entries": 63,
+        "version": "0123456789abcdef",
+        "warnings": [],
+        "history": [
+          {
+            "time": "2026-11-19T08:10:00Z",
+            "event": "held",
+            "provider": "cloudflare",
+            "version": "0123456789abcdef",
+            "previousVersion": "0123456789abcdef",
+            "added": [
+              "198.51.100.0/24"
+            ],
+            "removed": [],
+            "addedCount": 1,
+            "removedCount": 0,
+            "countBefore": 22,
+            "countAfter": 36,
+            "reason": "grew by 60%"
+          }
+        ]
+      }
+    ]
+  }
+}

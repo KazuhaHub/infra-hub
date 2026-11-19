@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -136,7 +136,7 @@ func (m *Mirror) git(ctx context.Context, gitDir string, args ...string) (string
 func (m *Mirror) Run(ctx context.Context) {
 	for {
 		if err := m.Fetch(ctx); err != nil && ctx.Err() == nil {
-			log.Printf("mirror: %v", err)
+			slog.Error("mirror fetch failed", "err", err)
 		}
 		select {
 		case <-ctx.Done():
