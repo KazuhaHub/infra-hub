@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,7 +16,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
-	"github.com/KazuhaHub/infra-hub/internal/hubca"
+	"github.com/KazuhaHub/infra-hub/internal/hubtrust"
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
 )
 
@@ -45,7 +44,7 @@ type Config struct {
 	// Clients maps a host name to how it identifies itself. In the file an entry is either the SSH public key
 	// (authorized_keys format) as a string, as before, or an object {"sshKey": "...", "agePublicKey": "age1..."}.
 	Clients map[string]Client `json:"clients"`
-	// HTTPSAddresses are the IP addresses and DNS names of this hub: the names in its certificate request.
+	// HTTPSAddresses are the IP addresses and DNS names of this hub: the SAN of its self-signed certificate.
 	HTTPSAddresses []string `json:"httpsAddresses"`
 	// HTTPS configures the HTTPS listener for agents; empty listen means no HTTPS.
 	HTTPS HTTPS `json:"https"`
@@ -74,11 +73,9 @@ type Config struct {
 type HTTPS struct {
 	// Listen is host:port. Empty: HTTPS is off.
 	Listen string `json:"listen"`
-	// Cert is the path of the hub certificate, signed by the hub CA. If it is empty or the file is missing the hub
-	// writes a certificate request and does not serve HTTPS (SSH is unaffected).
-	Cert string `json:"cert"`
-	// CACert is the hub CA certificate the hub certificate must chain to.
-	CACert string `json:"caCert"`
+	// Key is the path of the hub identity key (ECDSA P-256, PKCS#8 PEM, mode 0600), the same on every hub. The hub builds
+	// its self-signed certificate from it at every start (docs/hub-key.md).
+	Key string `json:"key"`
 }
 
 // Client is one host: the SSH key it connects with today and the age public key it answers challenges with.
@@ -161,6 +158,33 @@ func normalizeKeys(data []byte) ([]byte, error) {
 	}
 	if err := renameDeprecated(top, deprecatedKeys, ""); err != nil {
 		return nil, err
+	}
+	if raw, ok := top["https"]; ok {
+		var h map[string]json.RawMessage
+		if json.Unmarshal(raw, &h) == nil {
+			removed := false
+			for _, old := range []string{"caCert", "cert"} {
+				if _, ok := h[old]; ok {
+					slog.Warn("removed config key, ignored; delete it and use https.key (the hub identity key)", "key", "https."+old)
+					delete(h, old)
+					removed = true
+				}
+			}
+			// A v0.3.0 block has a listener and no key: it cannot serve without the identity key, but the hub (and
+			// SSH) must still start.
+			var key string
+			_ = json.Unmarshal(h["key"], &key)
+			if _, hasListen := h["listen"]; removed && hasListen && key == "" {
+				slog.Warn("https is off until https.key is set to the hub identity key", "key", "https.listen")
+				delete(h, "listen")
+				delete(h, "key")
+			}
+			out, err := json.Marshal(h)
+			if err != nil {
+				return nil, err
+			}
+			top["https"] = out
+		}
 	}
 	if raw, ok := top["ipSources"]; ok {
 		var sources map[string]map[string]json.RawMessage
@@ -280,7 +304,7 @@ func (c *Config) checkHTTPS() error {
 	}
 	seen := map[string]bool{}
 	for _, a := range c.HTTPSAddresses {
-		if ip, err := netip.ParseAddr(a); (err != nil && !hubca.DNSNameRe.MatchString(a)) || (err == nil && ip.Zone() != "") {
+		if !hubtrust.ValidAddress(a) {
 			return fmt.Errorf("config: httpsAddresses: %q is neither an IP address nor a plain lower-case DNS name", a)
 		}
 		if seen[a] {
@@ -290,19 +314,16 @@ func (c *Config) checkHTTPS() error {
 	}
 	h := c.HTTPS
 	if h.Listen == "" {
-		if h.Cert != "" || h.CACert != "" {
-			return errors.New("config: https.cert or https.caCert is set but https.listen is not")
+		if h.Key != "" {
+			return errors.New("config: https.key is set but https.listen is not")
 		}
 		return nil
 	}
 	if _, port, err := net.SplitHostPort(h.Listen); err != nil || port == "" || port == "0" {
 		return fmt.Errorf("config: https.listen %q must be host:port", h.Listen)
 	}
-	if h.CACert == "" || !filepath.IsAbs(h.CACert) {
-		return errors.New("config: https.caCert must be an absolute path when https.listen is set")
-	}
-	if h.Cert != "" && !filepath.IsAbs(h.Cert) {
-		return errors.New("config: https.cert must be an absolute path")
+	if h.Key == "" || !filepath.IsAbs(h.Key) {
+		return errors.New("config: https.key must be an absolute path when https.listen is set")
 	}
 	if len(c.HTTPSAddresses) == 0 {
 		return errors.New("config: httpsAddresses is empty but https.listen is set")

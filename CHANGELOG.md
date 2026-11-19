@@ -4,6 +4,36 @@
 
 ### Added
 
+- The hub identity key: one ECDSA P-256 key shared by every hub, whose pin (`sha256//...`) is all an agent needs.
+  `infra-hub key init --out <path>` generates it (refuses to overwrite) and prints the pin, and `key pin --key <path>`
+  prints it again. `infra-hub token --pin <pin>... [--key <path>] --hub <url>...` prints the one-line `ih1.` token for an
+  agent install (public pins and hub URLs only, no secret; several pins during a rotation). `-o json` is supported.
+  See docs/hub-key.md.
+- `https.key`: the path of the hub identity key. With `https.listen` set the hub serves a self-signed certificate built
+  in memory at start from this key (SAN from `httpsAddresses`, valid until 9999-12-31, TLS 1.3 only): no certificate
+  files, nothing to renew.
+- `internal/hubtrust` accepts a hub if and only if its leaf's public-key hash matches one of the configured pins
+  (chain, expiry and host name are ignored); `internal/jointoken` encodes and strictly decodes the token.
+
+### Changed
+
+- The agent-side trust is now a list of key pins instead of a CA pin. A hub whose identity key cannot be read logs an
+  error, serves no HTTPS and keeps serving SSH.
+- `https.cert` and `https.caCert` are ignored for one release, with a warning that names `https.key`; delete them from
+  the config. A v0.3.0 `https` block (`listen`, `cert`, `caCert`, no `key`) still loads: the hub warns that the old
+  fields are ignored and that HTTPS is off until `https.key` is set, and keeps serving SSH.
+
+### Removed
+
+- `infra-hub ca init`, `ca sign`, `ca pin` and `ca revoke`, `infra-hub https csr`, `internal/hubca` and docs/ca.md. The
+  hub CA and its certificate chain are gone.
+- Leftover files from the CA model: `hub-https.key` and `hub.csr` in the hub's state directory (the directory of the
+  state file, by default next to `infra.git`). The hub no longer reads or writes them; delete them.
+
+## v0.3.0
+
+### Added
+
 - Hub CA tooling for the owner's workstation: `infra-hub ca init --out <dir>` (ECDSA P-256 key, 20-year CA
   certificate, optional `--permit-ip` / `--permit-dns` name constraints, prints the `sha256//...` pin),
   `ca sign` (signs a hub's request; only IP and DNS names) and `ca pin`. The revocation list file format is defined

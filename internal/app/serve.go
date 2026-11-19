@@ -12,11 +12,11 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/KazuhaHub/infra-hub/internal/atomicfile"
 	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/config"
 	"github.com/KazuhaHub/infra-hub/internal/gitmirror"
 	"github.com/KazuhaHub/infra-hub/internal/httpsapi"
+	"github.com/KazuhaHub/infra-hub/internal/hubkey"
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
 	"github.com/KazuhaHub/infra-hub/internal/logx"
 	"github.com/KazuhaHub/infra-hub/internal/sshserver"
@@ -126,18 +126,18 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if ipm != nil {
 		srv.IPLists = ipm
 	}
-	if len(cfg.HTTPSAddresses) > 0 || cfg.HTTPS.Listen != "" {
-		id := httpsIdentity(cfg)
-		if cfg.HTTPS.Listen == "" {
-			// Addresses but no listener: still create the key and the request, so the owner can sign it in advance.
-			if csr, err := id.EnsureCSR(); err != nil {
-				slog.Error("cannot prepare the https identity", "err", err)
-			} else if err := atomicfile.Write(id.CSRPath, csr, 0o644); err != nil {
-				slog.Error("cannot write the certificate request", "path", id.CSRPath, "err", err)
-			}
+	if cfg.HTTPS.Listen != "" {
+		key, err := hubkey.Read(cfg.HTTPS.Key)
+		var pin string
+		if err == nil {
+			pin, err = hubkey.Pin(key)
+		}
+		if err != nil {
+			slog.Error("https is off: cannot use the hub identity key", "path", cfg.HTTPS.Key, "err", err)
 		} else {
+			slog.Info("https identity", "pin", pin)
 			hs := httpsapi.NewServer(cfg.AgeRecipients(), st)
-			run := &httpsapi.Runner{Identity: id, Listen: cfg.HTTPS.Listen, Server: hs}
+			run := &httpsapi.Runner{Key: key, Addresses: cfg.HTTPSAddresses, Listen: cfg.HTTPS.Listen, Server: hs}
 			go run.Run(ctx)
 		}
 	}
