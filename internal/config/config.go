@@ -6,13 +6,16 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"filippo.io/age"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
+	"github.com/KazuhaHub/infra-hub/internal/hubca"
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
 )
 
@@ -37,8 +40,13 @@ type Config struct {
 	// MaxStaleSeconds: the hub refuses to serve when its last successful fetch from upstream is older than this, or
 	// when it has had none since it started (default 600). Clients then use their next source.
 	MaxStaleSeconds int `json:"max_stale_seconds"`
-	// Clients maps a host name to the public key (authorized_keys format) it connects with.
-	Clients map[string]string `json:"clients"`
+	// Clients maps a host name to how it identifies itself. In the file an entry is either the SSH public key
+	// (authorized_keys format) as a string, as before, or an object {"sshKey": "...", "agePublicKey": "age1..."}.
+	Clients map[string]Client `json:"clients"`
+	// HTTPSAddresses are the IP addresses and DNS names of this hub: the names in its certificate request.
+	HTTPSAddresses []string `json:"httpsAddresses"`
+	// HTTPS configures the HTTPS listener for agents; empty listen means no HTTPS.
+	HTTPS HTTPS `json:"https"`
 	// Certs is the allow list of certificate names, each mapped to the one host that may fetch it. It is rendered
 	// from the inventory; there is no other way to add a name. Empty: the
 	// hub issues and serves no certificates.
@@ -58,6 +66,41 @@ type Config struct {
 	IPLists   map[string]iplists.IPList   `json:"ip_lists"`
 	// IPListDir holds one file per provider (default: iplists next to the repo, i.e. in StateDirectory).
 	IPListDir string `json:"iplist_dir"`
+}
+
+// HTTPS is the HTTPS listener.
+type HTTPS struct {
+	// Listen is host:port. Empty: HTTPS is off.
+	Listen string `json:"listen"`
+	// Cert is the path of the hub certificate, signed by the hub CA. If it is empty or the file is missing the hub
+	// writes a certificate request and does not serve HTTPS (SSH is unaffected).
+	Cert string `json:"cert"`
+	// CACert is the hub CA certificate the hub certificate must chain to.
+	CACert string `json:"caCert"`
+}
+
+// Client is one host: the SSH key it connects with today and the age public key it answers challenges with.
+type Client struct {
+	SSHKey       string `json:"sshKey"`
+	AgePublicKey string `json:"agePublicKey,omitempty"`
+}
+
+// UnmarshalJSON accepts the old form (a string, the SSH key) and the object form.
+func (c *Client) UnmarshalJSON(data []byte) error {
+	var key string
+	if err := json.Unmarshal(data, &key); err == nil {
+		*c = Client{SSHKey: key}
+		return nil
+	}
+	type plain Client
+	var p plain
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return fmt.Errorf("a client is an SSH key string or an object with sshKey and agePublicKey: %w", err)
+	}
+	*c = Client(p)
+	return nil
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -105,6 +148,9 @@ func ParseConfig(data []byte) (Config, error) {
 	if _, err := c.ClientKeys(); err != nil {
 		return Config{}, err
 	}
+	if err := c.checkHTTPS(); err != nil {
+		return Config{}, err
+	}
 	if c.CertDir == "" {
 		c.CertDir = filepath.Join(filepath.Dir(c.Repo), "certs")
 	}
@@ -135,6 +181,66 @@ func ParseConfig(data []byte) (Config, error) {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+func (c *Config) checkHTTPS() error {
+	ageSeen := map[string]string{}
+	for name, cl := range c.Clients {
+		if cl.AgePublicKey == "" {
+			continue
+		}
+		if other, dup := ageSeen[cl.AgePublicKey]; dup {
+			return fmt.Errorf("config: clients %s and %s have the same agePublicKey", other, name)
+		}
+		ageSeen[cl.AgePublicKey] = name
+		if _, err := age.ParseX25519Recipient(cl.AgePublicKey); err != nil {
+			return fmt.Errorf("config: client %s: agePublicKey is not an age public key", name)
+		}
+	}
+	seen := map[string]bool{}
+	for _, a := range c.HTTPSAddresses {
+		if ip, err := netip.ParseAddr(a); (err != nil && !hubca.DNSNameRe.MatchString(a)) || (err == nil && ip.Zone() != "") {
+			return fmt.Errorf("config: httpsAddresses: %q is neither an IP address nor a plain lower-case DNS name", a)
+		}
+		if seen[a] {
+			return fmt.Errorf("config: httpsAddresses: %q twice", a)
+		}
+		seen[a] = true
+	}
+	h := c.HTTPS
+	if h.Listen == "" {
+		if h.Cert != "" || h.CACert != "" {
+			return errors.New("config: https.cert or https.caCert is set but https.listen is not")
+		}
+		return nil
+	}
+	if _, port, err := net.SplitHostPort(h.Listen); err != nil || port == "" || port == "0" {
+		return fmt.Errorf("config: https.listen %q must be host:port", h.Listen)
+	}
+	if h.CACert == "" || !filepath.IsAbs(h.CACert) {
+		return errors.New("config: https.caCert must be an absolute path when https.listen is set")
+	}
+	if h.Cert != "" && !filepath.IsAbs(h.Cert) {
+		return errors.New("config: https.cert must be an absolute path")
+	}
+	if len(c.HTTPSAddresses) == 0 {
+		return errors.New("config: httpsAddresses is empty but https.listen is set")
+	}
+	return nil
+}
+
+// AgeRecipients are the clients' age public keys, by host name; clients without one are not listed.
+func (c Config) AgeRecipients() map[string]age.Recipient {
+	out := map[string]age.Recipient{}
+	for name, cl := range c.Clients {
+		if cl.AgePublicKey == "" {
+			continue
+		}
+		if r, err := age.ParseX25519Recipient(cl.AgePublicKey); err == nil {
+			out[name] = r
+		}
+	}
+	return out
 }
 
 // checkIPLists validates the providers and lists, and replaces each list's manual entries by their normalised form.
@@ -188,9 +294,13 @@ func (c Config) ClientKeys() (map[string]ssh.PublicKey, error) {
 	}
 	keys := map[string]ssh.PublicKey{}
 	seen := map[string]string{}
-	for name, line := range c.Clients {
+	for name, cl := range c.Clients {
 		if name == "" {
 			return nil, errors.New("config: a client has an empty name")
+		}
+		line := cl.SSHKey
+		if line == "" && cl.AgePublicKey != "" {
+			continue // an age-only client: it has no SSH identity
 		}
 		key, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(line))
 		if err != nil || len(bytes.TrimSpace(rest)) != 0 {

@@ -24,6 +24,7 @@ type StatusInput struct {
 	MainAttestation   string
 	MirrorLastSuccess time.Time // zero: the mirror has never fetched
 	Hosts             map[string]state.NodeRecord
+	Reports           map[string]state.HostReport // the latest agent report per host
 	Issuer            string
 	Certs             map[string]certs.CertStatus
 	IPLists           *iplists.IPStatus
@@ -49,6 +50,8 @@ type Host struct {
 	LastSeen        string `json:"lastSeen,omitempty"`
 	Main            string `json:"main,omitempty"`
 	MainAttestation string `json:"mainAttestation,omitempty"`
+	// Report is the latest report the host's agent sent over HTTPS; omitted until it has sent one.
+	Report *state.HostReport `json:"report,omitempty"`
 }
 
 // Cert is one certificate name of the allow list.
@@ -140,7 +143,12 @@ func NewStatus(in StatusInput) Status {
 	}
 	for _, name := range sortedKeys(in.Hosts) {
 		h := in.Hosts[name]
-		out.Hosts = append(out.Hosts, Host{Name: name, LastSeen: Time(h.LastSeen), Main: h.Main, MainAttestation: h.MainAttestation})
+		host := Host{Name: name, LastSeen: Time(h.LastSeen), Main: h.Main, MainAttestation: h.MainAttestation}
+		if r, ok := in.Reports[name]; ok {
+			r.Features = append([]state.FeatureSummary(nil), r.Features...)
+			host.Report = &r
+		}
+		out.Hosts = append(out.Hosts, host)
 	}
 	for _, name := range sortedKeys(in.Certs) {
 		c := in.Certs[name]

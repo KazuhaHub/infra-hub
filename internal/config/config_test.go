@@ -1,6 +1,7 @@
 package config
 
 import (
+	"filippo.io/age"
 	"fmt"
 	"strings"
 	"testing"
@@ -97,5 +98,94 @@ func TestConfigRejectsADuplicateProvider(t *testing.T) {
 		"ip_sources":{"cf":{"url":"https://x/y","format":"lines"}},"ip_lists":{"a":{"providers":["cf","cf"],"hosts":["h"]}}}`, key)
 	if _, err := ParseConfig([]byte(cfg)); err == nil {
 		t.Fatal("accepted")
+	}
+}
+
+func TestConfigClientsAndHTTPS(t *testing.T) {
+	_, key := testutil.NewKey(t)
+	id, _ := age.GenerateX25519Identity()
+	pub := id.Recipient().String()
+	parse := func(clients, extra string) (Config, error) {
+		return ParseConfig([]byte(`{"listen":"127.0.0.1:1","repo":"/x/infra.git","upstream":"u","host_key":"/x/k","clients":` + clients + extra + `}`))
+	}
+	// The old string form, and the object form with and without an age key.
+	c, err := parse(fmt.Sprintf(`{"old":%q,"both":{"sshKey":%q,"agePublicKey":%q},"ssh":{"sshKey":%q}}`, key, mustKey(t), pub, mustKey(t)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Clients["old"].SSHKey != key || c.Clients["old"].AgePublicKey != "" || c.Clients["both"].AgePublicKey != pub {
+		t.Errorf("clients: %+v", c.Clients)
+	}
+	if r := c.AgeRecipients(); len(r) != 1 || r["both"] == nil {
+		t.Errorf("recipients: %v", r)
+	}
+	keys, err := c.ClientKeys()
+	if err != nil || len(keys) != 3 {
+		t.Errorf("ssh keys: %d %v", len(keys), err)
+	}
+	// An age-only client has no SSH identity.
+	if c, err := parse(fmt.Sprintf(`{"a":{"agePublicKey":%q},"b":%q}`, pub, key), ""); err != nil {
+		t.Errorf("age-only client: %v", err)
+	} else if keys, _ := c.ClientKeys(); len(keys) != 1 {
+		t.Errorf("age-only client got an SSH key: %d", len(keys))
+	}
+	for name, clients := range map[string]string{
+		"bad age key":    fmt.Sprintf(`{"a":{"sshKey":%q,"agePublicKey":"age1nope"}}`, key),
+		"ssh key as age": fmt.Sprintf(`{"a":{"sshKey":%q,"agePublicKey":%q}}`, key, key),
+		"unknown field":  fmt.Sprintf(`{"a":{"sshKey":%q,"token":"x"}}`, key),
+		"neither":        `{"a":{}}`,
+		"number":         `{"a":5}`,
+	} {
+		if _, err := parse(clients, ""); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+
+	clients := fmt.Sprintf(`{"a":%q}`, key)
+	goodHTTPS := `,"httpsAddresses":["192.0.2.10","hub.example.org"],"https":{"listen":"192.0.2.10:8443","cert":"/etc/infra-hub/hub.crt","caCert":"/etc/infra-hub/ca.crt"}`
+	c, err = parse(clients, goodHTTPS)
+	if err != nil || c.HTTPS.Listen != "192.0.2.10:8443" || c.HTTPS.CACert != "/etc/infra-hub/ca.crt" || len(c.HTTPSAddresses) != 2 {
+		t.Fatalf("good https: %+v %v", c.HTTPS, err)
+	}
+	if _, err := parse(clients, `,"httpsAddresses":["192.0.2.10"],"https":{"listen":"192.0.2.10:8443","caCert":"/etc/infra-hub/ca.crt"}`); err != nil {
+		t.Errorf("no cert yet must be allowed: %v", err)
+	}
+	for name, extra := range map[string]string{
+		"wildcard name":  strings.Replace(goodHTTPS, "hub.example.org", "*.example.org", 1),
+		"upper case":     strings.Replace(goodHTTPS, "hub.example.org", "Hub.Example.org", 1),
+		"duplicate":      strings.Replace(goodHTTPS, "hub.example.org", "192.0.2.10", 1),
+		"no port":        strings.Replace(goodHTTPS, "192.0.2.10:8443", "192.0.2.10", 1),
+		"port 0":         strings.Replace(goodHTTPS, "192.0.2.10:8443", "192.0.2.10:0", 1),
+		"no CA":          strings.Replace(goodHTTPS, `,"caCert":"/etc/infra-hub/ca.crt"`, "", 1),
+		"relative CA":    strings.Replace(goodHTTPS, "/etc/infra-hub/ca.crt", "ca.crt", 1),
+		"relative cert":  strings.Replace(goodHTTPS, "/etc/infra-hub/hub.crt", "hub.crt", 1),
+		"no addresses":   `,"https":{"listen":"192.0.2.10:8443","caCert":"/etc/infra-hub/ca.crt"}`,
+		"cert no listen": `,"https":{"cert":"/etc/infra-hub/hub.crt"}`,
+		"unknown https":  strings.Replace(goodHTTPS, `"listen"`, `"x":1,"listen"`, 1),
+	} {
+		if _, err := parse(clients, extra); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func mustKey(t *testing.T) string {
+	_, k := testutil.NewKey(t)
+	return k
+}
+
+func TestConfigRejectsSharedAgeKeyAndZonedAddress(t *testing.T) {
+	_, k1 := testutil.NewKey(t)
+	_, k2 := testutil.NewKey(t)
+	id, _ := age.GenerateX25519Identity()
+	pub := id.Recipient().String()
+	base := `{"listen":"127.0.0.1:1","repo":"/x/infra.git","upstream":"u","host_key":"/x/k","clients":%s%s}`
+	shared := fmt.Sprintf(`{"a":{"sshKey":%q,"agePublicKey":%q},"b":{"sshKey":%q,"agePublicKey":%q}}`, k1, pub, k2, pub)
+	if _, err := ParseConfig([]byte(fmt.Sprintf(base, shared, ""))); err == nil {
+		t.Error("two clients with the same age key accepted")
+	}
+	one := fmt.Sprintf(`{"a":%q}`, k1)
+	if _, err := ParseConfig([]byte(fmt.Sprintf(base, one, `,"httpsAddresses":["fe80::1%eth0"]`))); err == nil {
+		t.Error("zoned address accepted")
 	}
 }

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Added
+
+- Hub CA tooling for the owner's workstation: `infra-hub ca init --out <dir>` (ECDSA P-256 key, 20-year CA
+  certificate, optional `--permit-ip` / `--permit-dns` name constraints, prints the `sha256//...` pin),
+  `ca sign` (signs a hub's request; only IP and DNS names) and `ca pin`. The revocation list file format is defined
+  and parsed (`internal/hubca`); nothing enforces it yet. See docs/ca.md.
+- The hub's HTTPS identity: its own ECDSA P-256 key in the state directory, a certificate request (`hub.csr`,
+  `infra-hub https csr`) with the names of `httpsAddresses`, and an HTTPS listener (`https.listen`, TLS 1.3 only) that
+  starts only with a certificate that matches the key, covers the configured names and chains to `https.caCert`.
+- HTTPS endpoints: `GET /v1/healthz`, `POST /v1/challenge` (an age-encrypted single-use nonce for a registered host,
+  rate limited) and `POST /v1/report` (the answer to the challenge plus a small, validated report). The latest report
+  of each host is stored in the state and shown by `status -o json` as `hosts[].report`.
+- A client in the config can be an object with `sshKey` and `agePublicKey`; the old string form still works.
+
 ### Changed
 
 - The command line is built with cobra: `infra-hub serve`, `status`, `iplist accept <provider>`,

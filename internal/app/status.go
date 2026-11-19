@@ -94,6 +94,7 @@ func collectStatus(ctx context.Context, cfg config.Config, noRefs bool, now time
 	for name := range cfg.Clients { // every configured host appears, seen or not
 		in.Hosts[name] = snap[name]
 	}
+	in.Reports = st.Reports()
 	return in, nil
 }
 
@@ -127,9 +128,13 @@ func writeStatusTable(w io.Writer, s report.Status) error {
 	fmt.Fprintf(w, "mirror:   %s\n", mirror)
 	fmt.Fprintf(w, "main:     %s\nattested: %s\nissuer:   %s\n", short12(s.Main), short12(s.MainAttestation), s.Issuer)
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "\nHOST\tLAST SEEN\tMAIN")
+	fmt.Fprintln(tw, "\nHOST\tLAST SEEN\tMAIN\tREPORT")
 	for _, h := range s.Hosts {
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", h.Name, orDash(h.LastSeen), short12(h.Main))
+		rep := "-"
+		if h.Report != nil {
+			rep = fmt.Sprintf("%s %s %s", h.Report.Result, short12(h.Report.AppliedCommit), h.Report.ReceivedAt)
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", h.Name, orDash(h.LastSeen), short12(h.Main), rep)
 	}
 	if len(s.Certs) > 0 {
 		fmt.Fprintln(tw, "\nCERT\tOWNER\tNOT AFTER\tRESULT\tFAILING")

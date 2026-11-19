@@ -161,3 +161,25 @@ func TestNoTimeKeyUnderJournal(t *testing.T) {
 		t.Errorf("text lost the time outside the journal: %s", buf.String())
 	}
 }
+
+func TestRecentNonceIsRedactedAndRingIsBounded(t *testing.T) {
+	t.Cleanup(ResetSecrets)
+	const n = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0"
+	AddRecent(n)
+	var buf bytes.Buffer
+	l, _ := New(&buf, "text", "info")
+	l.Info("report "+n, "nonce", n, "err", errors.New("bad "+n))
+	if out := buf.String(); strings.Contains(out, n) || !strings.Contains(out, Redacted) {
+		t.Fatalf("nonce reached the log: %s", out)
+	}
+	for i := 0; i < recentMax; i++ { // pushes the first value out of the ring
+		AddRecent(fmt.Sprintf("filler-%04d", i))
+	}
+	mu.RLock()
+	defer mu.RUnlock()
+	for _, v := range recent {
+		if v == n {
+			t.Fatal("ring did not forget the oldest value")
+		}
+	}
+}

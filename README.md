@@ -7,12 +7,11 @@ One repository holds both programs and they are released together under one vers
 
 | Program | What it is | Status |
 | --- | --- | --- |
-| `cmd/infra-hub` | The server. Mirrors the configuration repository, issues certificates, collects IP lists. | Works. Today it serves its clients over SSH (read-only git, `cert`, `iplist`). |
+| `cmd/infra-hub` | The server. Mirrors the configuration repository, issues certificates, collects IP lists, receives reports. | Works. Serves its clients over SSH (read-only git, `cert`, `iplist`); HTTPS for agents (challenge and report) is in. |
 | `cmd/infra-agent` | The per-machine agent. Pulls config, reports back, updates itself. | In progress. Not in the tree yet. |
 
 The target design (no SSH, age keys, challenge-response, signed bundles) is written down in
-[docs/design.md](docs/design.md). Logging, CLI and JSON conventions shared with Rackbook are in [docs/conventions.md](docs/conventions.md). The hub starts from its current SSH transport; the new transport arrives in later
-changes.
+[docs/design.md](docs/design.md). Logging, CLI and JSON conventions shared with Rackbook are in [docs/conventions.md](docs/conventions.md). Phase 1 of the new transport (the hub side) is done; the agent comes next.
 
 This is the code only. Your data (inventory, templates, roles, secrets) stays in your own private repository.
 
@@ -34,6 +33,12 @@ infra-hub serve                                   run the hub
 infra-hub status [-o json] [--no-refs]            mirror, hosts, certificates, IP lists
 infra-hub iplist accept <provider>                apply a held IP list update
 infra-hub iplist history <list> [--limit N]       change history of a list (JSON)
+infra-hub https csr                               print the hub's certificate request (creates its TLS key)
+infra-hub ca init --out <dir> [--permit-ip CIDR] [--permit-dns DOMAIN]
+                                                  create the hub CA (workstation only); prints the CA pin
+infra-hub ca sign --ca-key K --ca-cert C --csr hub.csr --out hub.crt [--days 825]
+                                                  sign a hub's request (IP and DNS names only)
+infra-hub ca pin --cert C                         print the sha256// pin of a certificate's key
 infra-hub version                                 also: infra-hub --version
 ```
 
@@ -51,7 +56,34 @@ Deprecated, removed in the next release: the old spellings `-config`, `-no-refs`
 `iplist-history` still work and print a warning on stderr. With `-config`, `status` keeps printing the previous
 snake_case JSON (also available as the hidden `--format legacy`) unless `-o` is given.
 
-The config is one JSON file; see `internal/config/config.go` for every field.
+- **HTTPS for agents.** With `https.listen` set the hub also serves `GET /v1/healthz`, `POST /v1/challenge` and
+  `POST /v1/report` over TLS 1.3, using a certificate signed by the hub CA (see [docs/ca.md](docs/ca.md)). A host
+  proves it holds its age key by decrypting a single-use nonce; its latest report shows up in `status -o json` under
+  `hosts[].report`. SSH is unchanged.
+
+The config is one JSON file; see `internal/config/config.go` for every field. The HTTPS part (all values are
+examples):
+
+```json
+{
+  "clients": {
+    "web1": {"sshKey": "ssh-ed25519 AAAA... web1", "agePublicKey": "age1qqq...example"},
+    "web2": "ssh-ed25519 AAAA... web2"
+  },
+  "httpsAddresses": ["192.0.2.10", "hub.example.org"],
+  "https": {
+    "listen": "192.0.2.10:8443",
+    "cert": "/etc/infra-hub/hub.crt",
+    "caCert": "/etc/infra-hub/ca.crt"
+  }
+}
+```
+
+A client is either its SSH public key as a string (the old form) or an object with `sshKey` and an optional
+`agePublicKey` (a host without one gets no challenge). On the first start with `httpsAddresses` the hub creates its
+TLS key (`hub-https.key`, mode 0600) next to its state file and, while there is no usable certificate, writes
+`hub.csr`; `infra-hub https csr` prints the same request. Sign it on your workstation, place the certificate at
+`https.cert`, and the hub starts serving HTTPS within about 30 seconds, without a restart.
 
 ## Build and test
 
@@ -73,6 +105,8 @@ internal/sshserver/  the SSH server: identity, host key, git upload-pack, cert a
 internal/gitmirror/  the read-only git mirror
 internal/certs/      certificate store, renewal, ACME issuer
 internal/iplists/    IP list collection, validation, history
+internal/hubca/      the hub CA: init, sign, pin, revocation list format
+internal/httpsapi/   the hub's TLS identity and the /v1 HTTPS endpoints
 internal/config/     the config file
 internal/state/      per-host last-seen state
 testdata/            public IP-range fixtures used by the tests

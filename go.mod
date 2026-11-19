@@ -3,6 +3,7 @@ module github.com/KazuhaHub/infra-hub
 go 1.26.0
 
 require (
+	filippo.io/age v1.3.2
 	github.com/go-acme/lego/v4 v4.35.2
 	github.com/jmespath/go-jmespath v0.4.0
 	github.com/spf13/cobra v1.10.2
@@ -11,6 +12,7 @@ require (
 )
 
 require (
+	filippo.io/hpke v0.4.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

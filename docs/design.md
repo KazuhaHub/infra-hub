@@ -1,7 +1,14 @@
 # Target design
 
-Status: the hub exists and speaks SSH today. The agent and the transport below are not implemented yet; this document
-is what the next changes build towards.
+Status: the hub speaks SSH (unchanged) and, since phase 1, HTTPS. The agent is not written yet; this document is what
+the next changes build towards.
+
+| Phase | Content | State |
+| --- | --- | --- |
+| 1 | Hub side: CA tooling, hub HTTPS identity, `/v1/healthz`, `/v1/challenge`, `/v1/report`, reports in `status` | done |
+| 2 | `infra-agent`: challenge-response client, report sender, polling | open |
+| 3 | `/v1/bundle`, certificates and IP lists over HTTPS, install script, kick, self-update | open |
+| 4 | Revocation list enforced (agent side), CA rotation, SSH removed | open |
 
 ## Goals
 
@@ -31,10 +38,12 @@ is what the next changes build towards.
 
 The link between agents and hubs must not depend on any outside service, so it does not use Let's Encrypt:
 
-- A small **hub CA** (an ed25519 key) is the only thing agents trust. Its private key never lives on a server: it is kept
-  encrypted for the owner only and is used on the owner's workstation to sign hub certificates.
+- A small **hub CA** (an ECDSA P-256 key: it is the curve every TLS client and curl build supports) is the only thing agents trust. Its private key never lives on a server: it is kept
+  encrypted for the owner only and is used on the owner's workstation to sign hub certificates (`infra-hub ca`, see [ca.md](ca.md)). The CA can carry a
+  critical name constraint, so that even a stolen CA key can only certify the fleet's own addresses.
 - Every hub (primary, standbys) has its **own** key and a certificate for it signed by the hub CA. Adding a hub is one
-  signature; no agent changes. A compromised hub is revoked alone (the revocation list is part of the signed bundle).
+  signature; no agent changes. A compromised hub is revoked alone (the revocation list, a JSON list of serials defined in `internal/hubca`, is part of
+  the signed bundle; enforcing it is phase 4).
 - Agents verify the hub's TLS certificate against the pinned CA public key (`AGENT_HUB_CA` in `agent.env`), not against
   the system roots and not by expiry of a public CA. Let's Encrypt, DNS or Cloudflare being down does not affect them.
 - Rotating the CA: the old CA signs the new CA's public key; agents learn it over the verified channel and add it, then
@@ -68,6 +77,18 @@ Reports go over HTTPS, authenticated by **challenge-response with the machine's 
 
 The nonce is single-use with a short TTL, so a captured report cannot be replayed. Only the holder of the age private
 key can read the nonce, so no password or token is stored on the machine.
+
+Implemented in phase 1: `POST /v1/challenge` (body `{"host":"<name>"}`) returns the age-armored ciphertext of a random
+32-byte nonce, encrypted to the host's `agePublicKey` from the hub config. `POST /v1/report` carries
+`{"apiVersion":"v1","host":...,"nonce":"<hex of the decrypted nonce>","report":{...}}`. A nonce is single use, valid
+5 minutes, held in memory (bounded). Challenges are rate limited per host and per peer address. The report is
+validated (`appliedCommit`, `result` ok or failed, `message`, `time`, `features[]`; at most 64 KiB), the latest one per
+host is stored in the hub's state and appears in `infra-hub status -o json` as `hosts[].report`. Errors are
+`401 bad_nonce`, `400 bad_report`, `413 too_large`, `429 rate_limited`, `404 unknown_host`.
+
+The hub serves HTTPS (TLS 1.3 only) only with a certificate that matches its own key, covers the names in
+`httpsAddresses` and chains to the configured CA certificate; otherwise it logs an error, keeps writing nothing but the
+certificate request `hub.csr`, and serves SSH as before.
 
 ## Polling and kicking
 

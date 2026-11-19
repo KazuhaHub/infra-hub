@@ -260,7 +260,7 @@ func TestStatusWithNoRefsRunsNoGit(t *testing.T) {
 	marker := filepath.Join(bin, "git-ran")
 	os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\ntouch "+marker+"\necho 'abc refs/heads/main'\n"), 0o755)
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	cfg := config.Config{Repo: "/x/infra.git", State: filepath.Join(t.TempDir(), "s.json"), Clients: map[string]string{"h": ""}, CertDir: t.TempDir()}
+	cfg := config.Config{Repo: "/x/infra.git", State: filepath.Join(t.TempDir(), "s.json"), Clients: map[string]config.Client{"h": {}}, CertDir: t.TempDir()}
 	if _, err := collectStatus(context.Background(), cfg, true, fixedNow); err != nil {
 		t.Fatal(err)
 	}
