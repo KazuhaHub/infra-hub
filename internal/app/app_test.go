@@ -31,9 +31,9 @@ func newHub(t *testing.T) hubDir {
 	_, key := testutil.NewKey(t)
 	cfg := map[string]any{
 		"listen": "127.0.0.1:11882", "repo": filepath.Join(dir, "infra.git"), "upstream": "git@example.invalid:x/infra.git",
-		"host_key": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": key},
-		"ip_sources": map[string]any{"cdn": map[string]any{"url": "https://example.invalid/ips", "format": "lines"}},
-		"ip_lists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}, "hosts": []string{"h1"}}},
+		"hostKey": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": key},
+		"ipSources": map[string]any{"cdn": map[string]any{"url": "https://example.invalid/ips", "format": "lines"}},
+		"ipLists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}, "hosts": []string{"h1"}}},
 	}
 	data, _ := json.Marshal(cfg)
 	path := filepath.Join(dir, "config.json")
@@ -260,7 +260,7 @@ func TestStatusWithNoRefsRunsNoGit(t *testing.T) {
 	marker := filepath.Join(bin, "git-ran")
 	os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\ntouch "+marker+"\necho 'abc refs/heads/main'\n"), 0o755)
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
-	cfg := config.Config{Repo: "/x/infra.git", State: filepath.Join(t.TempDir(), "s.json"), Clients: map[string]string{"h": ""}, CertDir: t.TempDir()}
+	cfg := config.Config{Repo: "/x/infra.git", State: filepath.Join(t.TempDir(), "s.json"), Clients: map[string]config.Client{"h": {}}, CertDir: t.TempDir()}
 	if _, err := collectStatus(context.Background(), cfg, true, fixedNow); err != nil {
 		t.Fatal(err)
 	}

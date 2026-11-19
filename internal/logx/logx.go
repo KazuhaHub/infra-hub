@@ -26,9 +26,16 @@ type Secret string
 func (Secret) LogValue() slog.Value { return slog.StringValue(Redacted) }
 func (Secret) String() string       { return Redacted }
 
+// recentMax bounds how many short-lived secrets (challenge nonces) are remembered.
+const recentMax = 1024
+
 var (
 	mu      sync.RWMutex
 	secrets []string
+	// recent is a ring of short-lived secrets: the oldest is forgotten when a new one arrives, so a hub that issues
+	// nonces forever neither grows nor slows down.
+	recent     [recentMax]string
+	recentNext int
 )
 
 var (
@@ -55,11 +62,26 @@ func AddSecret(v string) {
 	secrets = append(secrets, v)
 }
 
+// AddRecent registers a short-lived secret such as a challenge nonce. Only the last recentMax values are kept, so
+// it suits values that are issued continuously and are useless once used or expired.
+func AddRecent(v string) {
+	v = strings.TrimSpace(v)
+	if len(v) < 6 {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	recent[recentNext] = v
+	recentNext = (recentNext + 1) % recentMax
+}
+
 // ResetSecrets forgets every registered value (for tests).
 func ResetSecrets() {
 	mu.Lock()
 	defer mu.Unlock()
 	secrets = nil
+	recent = [recentMax]string{}
+	recentNext = 0
 }
 
 // Scrub returns s with registered secrets, private key blocks and URL credentials replaced.
@@ -70,6 +92,11 @@ func Scrub(s string) string {
 	defer mu.RUnlock()
 	for _, sec := range secrets {
 		s = strings.ReplaceAll(s, sec, Redacted)
+	}
+	for _, sec := range recent {
+		if sec != "" && strings.Contains(s, sec) {
+			s = strings.ReplaceAll(s, sec, Redacted)
+		}
 	}
 	return s
 }

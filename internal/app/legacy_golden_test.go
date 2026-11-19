@@ -41,10 +41,10 @@ func writeLegacyFixture(t *testing.T, dir string) string {
 	_, k2 := testutil.NewKey(t)
 	cfgData, _ := json.Marshal(map[string]any{
 		"listen": "127.0.0.1:11882", "repo": filepath.Join(dir, "infra.git"), "upstream": "git@example.invalid:x/infra.git",
-		"host_key": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": k1, "h2": k2},
-		"certs":      map[string]string{"a.example.org": "h1", "b.example.org": "h2"},
-		"ip_sources": map[string]any{"cdn": map[string]any{"url": "https://example.invalid/ips", "format": "lines"}},
-		"ip_lists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}, "manual": []string{"8.8.8.0/24"}, "hosts": []string{"h1", "h2"}}},
+		"hostKey": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": k1, "h2": k2},
+		"certs":     map[string]string{"a.example.org": "h1", "b.example.org": "h2"},
+		"ipSources": map[string]any{"cdn": map[string]any{"url": "https://example.invalid/ips", "format": "lines"}},
+		"ipLists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}, "manual": []string{"8.8.8.0/24"}, "hosts": []string{"h1", "h2"}}},
 	})
 	cfgPath := filepath.Join(dir, "config.json")
 	must(t, os.MkdirAll(dir, 0o700))

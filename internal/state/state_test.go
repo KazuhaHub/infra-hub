@@ -118,3 +118,25 @@ func TestLoadStateDamagedFile(t *testing.T) {
 		t.Fatalf("want an error and a usable empty state, got %v %v", s, err)
 	}
 }
+
+func TestReportsPersistAndReplace(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.json")
+	s, _ := LoadState(path)
+	s.SetReport("h1", HostReport{AppliedCommit: "a", Result: "ok", Time: "2026-11-19T08:00:00Z", ReceivedAt: "2026-11-19T08:00:01Z"})
+	s.SetReport("h1", HostReport{AppliedCommit: "b", Result: "failed", Time: "2026-11-19T08:05:00Z", ReceivedAt: "2026-11-19T08:05:01Z"})
+	if err := s.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	again, err := LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := again.Reports(); len(r) != 1 || r["h1"].AppliedCommit != "b" || r["h1"].Result != "failed" {
+		t.Errorf("reports after reload: %+v", r)
+	}
+	// An old state file without reports still loads.
+	os.WriteFile(path, []byte(`{"mirror_last_success":"2026-11-19T08:00:00Z","hosts":{}}`), 0o644)
+	if old, err := LoadState(path); err != nil || len(old.Reports()) != 0 {
+		t.Errorf("old file: %v", err)
+	}
+}

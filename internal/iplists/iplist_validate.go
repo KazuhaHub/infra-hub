@@ -164,7 +164,7 @@ type IPSource struct {
 	// "result.ipv4_cidrs" or "prefixes[?service=='CLOUDFRONT'].ip_prefix". Every expression must match something.
 	Select []string `json:"select,omitempty"`
 	// MaxBytes caps the download (default DefaultMaxBytes).
-	MaxBytes int `json:"max_bytes,omitempty"`
+	MaxBytes int `json:"maxBytes,omitempty"`
 }
 
 const (
