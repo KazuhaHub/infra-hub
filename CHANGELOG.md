@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.1
+
+### Fixed
+
+- The hub identity key is accepted as a systemd credential: systemd 256+ hands credentials over as root:root 0440 with an ACL
+  for the service user, which v0.4.0 refused as group-readable (HTTPS stayed off). Group read access is now allowed for the
+  root group only; others, other groups and group write are still refused.
+
 ## v0.4.0
 
 ### Added
