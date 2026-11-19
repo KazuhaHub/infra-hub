@@ -75,7 +75,8 @@ func WriteNew(path string, key *ecdsa.PrivateKey) error {
 
 // Read reads a PKCS#8 PEM ECDSA P-256 key. The path (after following a symlink) must be a regular file, which is checked
 // before it is opened so that a FIFO or device cannot block the hub; the file is then opened without blocking, it must
-// be the same file, and its mode is checked on the open handle: no access for group or others.
+// be the same file, and its mode is checked on the open handle: no access for others, and group access only as read
+// access for the root group (systemd 256+ hands credentials over as root:root 0440 with an ACL for the service user).
 func Read(path string) (*ecdsa.PrivateKey, error) {
 	before, err := os.Stat(path)
 	if err != nil {
@@ -96,14 +97,28 @@ func Read(path string) (*ecdsa.PrivateKey, error) {
 	if !st.Mode().IsRegular() || !os.SameFile(before, st) {
 		return nil, fmt.Errorf("%s changed while it was being opened", path)
 	}
-	if st.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("%s is accessible by group or others (mode %v); it must be 0600 or 0400 (no group or other access)", path, st.Mode().Perm())
+	if err := checkMode(path, st); err != nil {
+		return nil, err
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 64<<10))
 	if err != nil {
 		return nil, err
 	}
 	return Parse(data)
+}
+
+// checkMode refuses a key that others can access, or that a group other than root can access, or that any group can write.
+func checkMode(path string, st os.FileInfo) error {
+	perm := st.Mode().Perm()
+	bad := perm&0o007 != 0 || perm&0o020 != 0
+	if perm&0o040 != 0 {
+		sys, ok := st.Sys().(*syscall.Stat_t)
+		bad = bad || !ok || sys.Gid != 0
+	}
+	if bad {
+		return fmt.Errorf("%s is accessible by group or others (mode %v); it must be 0600 or 0400 (0440 only for the root group, as systemd credentials are)", path, perm)
+	}
+	return nil
 }
 
 // Parse reads a PKCS#8 PEM ECDSA P-256 key.

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -47,7 +48,7 @@ func TestReadRefusals(t *testing.T) {
 	loose := filepath.Join(dir, "loose")
 	data, _ := Marshal(k)
 	os.WriteFile(loose, data, 0o644)
-	if _, err := Read(loose); err == nil || !strings.Contains(err.Error(), "0600 or 0400") {
+	if _, err := Read(loose); err == nil || !strings.Contains(err.Error(), "must be 0600 or 0400") {
 		t.Errorf("loose mode: %v", err)
 	}
 	for name, content := range map[string]string{"garbage": "hello", "empty": "", "wrong type": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"} {
@@ -136,6 +137,33 @@ func TestOtherKeyTypesAreRefused(t *testing.T) {
 		_, err = Read(path)
 		if err == nil || !strings.Contains(err.Error(), "P-256") || !strings.Contains(err.Error(), "key init") || !strings.Contains(err.Error(), name) {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+type fakeInfo struct {
+	os.FileInfo
+	mode os.FileMode
+	gid  uint32
+}
+
+func (f fakeInfo) Mode() os.FileMode { return f.mode }
+func (f fakeInfo) Sys() any          { return &syscall.Stat_t{Gid: f.gid} }
+
+func TestCheckMode(t *testing.T) {
+	for _, c := range []struct {
+		mode os.FileMode
+		gid  uint32
+		ok   bool
+	}{
+		{0o600, 1000, true}, {0o400, 1000, true},
+		{0o440, 0, true}, // systemd credential: root:root 0440 plus an ACL for the service user
+		{0o640, 0, true},
+		{0o440, 1000, false}, {0o460, 0, false}, {0o444, 0, false}, {0o602, 0, false}, {0o644, 0, false},
+	} {
+		err := checkMode("k", fakeInfo{mode: c.mode, gid: c.gid})
+		if (err == nil) != c.ok {
+			t.Errorf("mode %o gid %d: %v", c.mode, c.gid, err)
 		}
 	}
 }
