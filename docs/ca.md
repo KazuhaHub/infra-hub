@@ -20,11 +20,11 @@ This writes `ca.crt` (public, valid 20 years) and `ca.key` (ECDSA P-256, mode 06
 sha256//AbCdEf...=
 ```
 
-The pin identifies the CA's public key; it is public, and `infra-hub ca pin --cert hub-ca/ca.crt` prints it again.
-Agents verify a hub's certificate against `ca.crt` (not against the system roots). Note that `curl --pinnedpubkey`
-compares the key of the server's own certificate, not the CA's: for the install one-liner use the **hub pin** that
-`ca sign` prints for each hub certificate (`infra-hub ca pin --cert hub.crt` prints it too). The hub serves only its
-own certificate; the CA certificate is distributed to agents separately.
+The pin identifies the CA's public key; it is public, and `infra-hub ca pin --cert hub-ca/ca.crt` prints it again. It
+is the only thing an agent is given (`AGENT_HUB_CA_PIN`): a hub presents its certificate followed by the CA
+certificate, and the agent accepts the presented CA certificate only if its key matches the pin. Note that
+`curl --pinnedpubkey` compares the key of the server's own certificate, not the CA's: for the install one-liner use the
+**hub pin** that `ca sign` prints for each hub certificate (`infra-hub ca pin --cert hub.crt` prints it too).
 
 `--permit-ip` and `--permit-dns` (repeatable) put a critical name constraint into the CA certificate: whatever happens
 to the CA key, certificates for other names are rejected by every verifier. A name type you do not list is excluded
@@ -66,7 +66,7 @@ Never put the CA key in the hub's configuration, in CI, or on any server.
    them down; the serial is what a revocation entry names.
 3. Commit `hub.crt` to the infra repository; infra places it at the hub's `https.cert` path. The running hub notices
    within about 30 seconds, checks that the certificate matches its key, covers `httpsAddresses` and chains to
-   `https.caCert`, and starts serving HTTPS. A certificate that fails the check is logged as an error and not used;
+   `https.caCert`, and starts serving HTTPS, presenting its certificate followed by the CA certificate. A certificate that fails the check is logged as an error and not used;
    the hub keeps serving SSH. A renewed file is picked up within 5 minutes.
 
 Adding a standby hub is the same steps on that hub: one new signature, no change on the agents.
@@ -89,7 +89,7 @@ JSON file, to be distributed later inside the signed bundle (so it needs no sign
 ```
 
 `serial` is the certificate serial in lower-case hex without leading zeros (as `ca sign` prints it); entries are sorted
-by serial as plain text (byte order of the hex string), without duplicates. The type and the parser exist in `internal/hubca`; no command writes the file and
+ascending by serial as a number (`ff` comes before `100`), without duplicates. The type and the parser exist in `internal/hubca`; no command writes the file and
 nothing enforces it yet. The agent will enforce it in a later phase.
 
 ## Rotating the CA
@@ -97,9 +97,9 @@ nothing enforces it yet. The agent will enforce it in a later phase.
 Rotate when the CA key may have leaked or in good time before the CA certificate expires (20 years).
 
 1. Create the new CA (`ca init` into a new directory) and store its key as above.
-2. The old CA signs the new CA's public key; agents learn the new CA over the verified channel and add it. This
-   transition is part of the agent phase; until it exists, rotation means giving every agent the new pin by a
-   reviewed change in the infra repository.
+2. The old CA signs the new CA's public key; agents learn the new pin over the verified channel and add it to
+   `AGENT_HUB_CA_PIN`. This transition is part of the agent phase; until it exists, rotation means giving every agent
+   the new pin by a reviewed change in the infra repository.
 3. Sign every hub's request with the new CA and place the new certificates.
 4. When no agent trusts only the old CA any more, retire it: remove the old pin from the agents' settings and delete
    the old SOPS file.

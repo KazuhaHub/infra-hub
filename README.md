@@ -80,10 +80,21 @@ examples):
 ```
 
 A client is either its SSH public key as a string (the old form) or an object with `sshKey` and an optional
-`agePublicKey` (a host without one gets no challenge). On the first start with `httpsAddresses` the hub creates its
+`agePublicKey` (a host without one gets no challenge). Only age X25519 keys (`age1...`) are supported. On the first start with `httpsAddresses` the hub creates its
 TLS key (`hub-https.key`, mode 0600) next to its state file and, while there is no usable certificate, writes
 `hub.csr`; `infra-hub https csr` prints the same request. Sign it on your workstation, place the certificate at
-`https.cert`, and the hub starts serving HTTPS within about 30 seconds, without a restart.
+`https.cert`, and the hub starts serving HTTPS within about 30 seconds, without a restart. The hub presents its
+certificate followed by the CA certificate; an agent needs only the CA pin (`internal/hubtrust`).
+
+### Config keys are camelCase (migration)
+
+Every config key is lower camelCase, like the rest of the JSON this project writes (`hostKey`,
+`mirrorIntervalSeconds`, `maxStaleSeconds`, `certDir`, `acmeDirectory`, `acmeEmail`, `cloudflareTokenFile`,
+`ipSources` (with `maxBytes` inside a source), `ipLists`, `ipListDir`). The earlier snake_case spellings (`host_key`,
+`mirror_interval_seconds`, `max_stale_seconds`, `cert_dir`, `acme_directory`, `acme_email`, `cloudflare_token_file`,
+`ip_sources` with `max_bytes`, `ip_lists`, `iplist_dir`) still work for one release: the hub logs a warning that names
+the new key and starts. A config that sets both spellings of one key is rejected. To migrate, rename the keys; nothing
+else changes.
 
 ## Build and test
 
@@ -106,6 +117,7 @@ internal/gitmirror/  the read-only git mirror
 internal/certs/      certificate store, renewal, ACME issuer
 internal/iplists/    IP list collection, validation, history
 internal/hubca/      the hub CA: init, sign, pin, revocation list format
+internal/hubtrust/   how an agent verifies a hub's certificate chain against the CA pin
 internal/httpsapi/   the hub's TLS identity and the /v1 HTTPS endpoints
 internal/config/     the config file
 internal/state/      per-host last-seen state

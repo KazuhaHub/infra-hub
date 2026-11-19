@@ -148,7 +148,7 @@ func TestNameConstraintsHoldAtSigning(t *testing.T) {
 }
 
 func TestRevocationList(t *testing.T) {
-	good := `{"apiVersion":"v1","revoked":[{"serial":"1a2b","time":"2026-11-19T08:00:00Z","reason":"key lost"},{"serial":"ff","time":"2026-11-19T09:00:00Z"}]}`
+	good := `{"apiVersion":"v1","revoked":[{"serial":"ff","time":"2026-11-19T09:00:00Z"},{"serial":"1a2b","time":"2026-11-19T08:00:00Z","reason":"key lost"}]}`
 	l, err := ParseRevocationList([]byte(good))
 	if err != nil {
 		t.Fatal(err)
@@ -171,6 +171,13 @@ func TestRevocationList(t *testing.T) {
 		if _, err := ParseRevocationList([]byte(doc)); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+	// Numeric, not textual, order: "ff" (255) comes before "100" (256).
+	if _, err := ParseRevocationList([]byte(`{"apiVersion":"v1","revoked":[{"serial":"ff","time":"2026-11-19T08:00:00Z"},{"serial":"100","time":"2026-11-19T08:00:00Z"}]}`)); err != nil {
+		t.Errorf("numeric order refused: %v", err)
+	}
+	if _, err := ParseRevocationList([]byte(`{"apiVersion":"v1","revoked":[{"serial":"100","time":"2026-11-19T08:00:00Z"},{"serial":"ff","time":"2026-11-19T08:00:00Z"}]}`)); err == nil {
+		t.Error("text order accepted")
 	}
 	var nilList *RevocationList
 	if nilList.Contains(big.NewInt(1)) {

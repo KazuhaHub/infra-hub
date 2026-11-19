@@ -18,6 +18,11 @@
 
 ### Changed
 
+- Config keys are camelCase: `hostKey`, `mirrorIntervalSeconds`, `maxStaleSeconds`, `certDir`, `acmeDirectory`,
+  `acmeEmail`, `cloudflareTokenFile`, `ipSources` (`maxBytes` in a source), `ipLists`, `ipListDir`. The snake_case
+  spellings are accepted for one release with a warning naming the new key; setting both spellings of a key is an error.
+- The hub presents its certificate and the CA certificate; `internal/hubtrust` verifies such a chain against a CA pin
+  (for the agent).
 - The command line is built with cobra: `infra-hub serve`, `status`, `iplist accept <provider>`,
   `iplist history <list> [--limit N]` and `version`, plus `--version`. Flags are `--long-name` and can come from
   `INFRA_HUB_<NAME>` environment variables. Exit codes are 0, 1, 2 (usage) and 3 (not ready).

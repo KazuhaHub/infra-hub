@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"filippo.io/age"
@@ -34,12 +36,12 @@ type Config struct {
 	// State is the JSON file with last-seen times (default: state.json next to the repo).
 	State string `json:"state"`
 	// HostKey is the hub's own SSH host key (private key file; generated on first start if missing).
-	HostKey string `json:"host_key"`
+	HostKey string `json:"hostKey"`
 	// MirrorIntervalSeconds is how often the mirror fetches (default 60).
-	MirrorIntervalSeconds int `json:"mirror_interval_seconds"`
+	MirrorIntervalSeconds int `json:"mirrorIntervalSeconds"`
 	// MaxStaleSeconds: the hub refuses to serve when its last successful fetch from upstream is older than this, or
 	// when it has had none since it started (default 600). Clients then use their next source.
-	MaxStaleSeconds int `json:"max_stale_seconds"`
+	MaxStaleSeconds int `json:"maxStaleSeconds"`
 	// Clients maps a host name to how it identifies itself. In the file an entry is either the SSH public key
 	// (authorized_keys format) as a string, as before, or an object {"sshKey": "...", "agePublicKey": "age1..."}.
 	Clients map[string]Client `json:"clients"`
@@ -52,20 +54,20 @@ type Config struct {
 	// hub issues and serves no certificates.
 	Certs map[string]string `json:"certs"`
 	// CertDir holds the ACME account and the certificates (default: certs next to the repo, i.e. in StateDirectory).
-	CertDir string `json:"cert_dir"`
+	CertDir string `json:"certDir"`
 	// AcmeDirectory is the ACME directory URL (default: Let's Encrypt production). Tests and staging use another.
-	AcmeDirectory string `json:"acme_directory"`
+	AcmeDirectory string `json:"acmeDirectory"`
 	// AcmeEmail is an optional ACME contact.
-	AcmeEmail string `json:"acme_email"`
+	AcmeEmail string `json:"acmeEmail"`
 	// CloudflareTokenFile holds the Cloudflare API token; default $CREDENTIALS_DIRECTORY/cf_token (systemd LoadCredential).
-	CloudflareTokenFile string `json:"cloudflare_token_file"`
+	CloudflareTokenFile string `json:"cloudflareTokenFile"`
 	// IPSources are the providers of IP ranges (name -> where to download and how to read it); IPLists are the named
 	// lists built from them plus manual entries, each with the hosts that may fetch it. Both are rendered from the
 	// inventory. Empty: the hub collects and serves no lists.
-	IPSources map[string]iplists.IPSource `json:"ip_sources"`
-	IPLists   map[string]iplists.IPList   `json:"ip_lists"`
+	IPSources map[string]iplists.IPSource `json:"ipSources"`
+	IPLists   map[string]iplists.IPList   `json:"ipLists"`
 	// IPListDir holds one file per provider (default: iplists next to the repo, i.e. in StateDirectory).
-	IPListDir string `json:"iplist_dir"`
+	IPListDir string `json:"ipListDir"`
 }
 
 // HTTPS is the HTTPS listener.
@@ -111,8 +113,87 @@ func LoadConfig(path string) (Config, error) {
 	return ParseConfig(data)
 }
 
+// deprecatedKeys are the snake_case spellings of earlier releases, accepted for one release. The new spelling is
+// camelCase everywhere (docs/conventions.md).
+var deprecatedKeys = map[string]string{
+	"host_key": "hostKey", "mirror_interval_seconds": "mirrorIntervalSeconds", "max_stale_seconds": "maxStaleSeconds",
+	"cert_dir": "certDir", "acme_directory": "acmeDirectory", "acme_email": "acmeEmail",
+	"cloudflare_token_file": "cloudflareTokenFile", "ip_sources": "ipSources", "ip_lists": "ipLists", "iplist_dir": "ipListDir",
+}
+
+// deprecatedSourceKeys are the same for one entry of ipSources.
+var deprecatedSourceKeys = map[string]string{"max_bytes": "maxBytes"}
+
+// renameDeprecated moves each deprecated key of obj to its new name and warns about it. A key set in both spellings
+// is an error: which one should win is not for the hub to guess.
+func renameDeprecated(obj map[string]json.RawMessage, aliases map[string]string, where string) error {
+	for _, old := range sortedAliasKeys(aliases) {
+		v, ok := obj[old]
+		if !ok {
+			continue
+		}
+		nw := aliases[old]
+		if _, both := obj[nw]; both {
+			return fmt.Errorf("config: %s%q and %q are both set; use only %q", where, old, nw, nw)
+		}
+		slog.Warn("deprecated config key, rename it", "key", where+old, "use", where+nw)
+		obj[nw] = v
+		delete(obj, old)
+	}
+	return nil
+}
+
+func sortedAliasKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// normalizeKeys rewrites the deprecated spellings in data; anything that is not a JSON object is left for the
+// decoder to report.
+func normalizeKeys(data []byte) ([]byte, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil || top == nil {
+		return data, nil
+	}
+	if err := renameDeprecated(top, deprecatedKeys, ""); err != nil {
+		return nil, err
+	}
+	if raw, ok := top["ipSources"]; ok {
+		var sources map[string]map[string]json.RawMessage
+		if json.Unmarshal(raw, &sources) == nil {
+			names := make([]string, 0, len(sources))
+			for n := range sources {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			for _, n := range names {
+				if sources[n] == nil {
+					continue
+				}
+				if err := renameDeprecated(sources[n], deprecatedSourceKeys, "ipSources."+n+"."); err != nil {
+					return nil, err
+				}
+			}
+			out, err := json.Marshal(sources)
+			if err != nil {
+				return nil, err
+			}
+			top["ipSources"] = out
+		}
+	}
+	return json.Marshal(top)
+}
+
 func ParseConfig(data []byte) (Config, error) {
 	var c Config
+	data, err := normalizeKeys(data)
+	if err != nil {
+		return Config{}, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&c); err != nil {
@@ -122,13 +203,13 @@ func ParseConfig(data []byte) (Config, error) {
 		c.MirrorIntervalSeconds = 60
 	}
 	if c.MirrorIntervalSeconds < 5 {
-		return Config{}, errors.New("config: mirror_interval_seconds must be at least 5")
+		return Config{}, errors.New("config: mirrorIntervalSeconds must be at least 5")
 	}
 	if c.MaxStaleSeconds == 0 {
 		c.MaxStaleSeconds = 600
 	}
 	if c.MaxStaleSeconds < 2*c.MirrorIntervalSeconds {
-		return Config{}, errors.New("config: max_stale_seconds must be at least twice mirror_interval_seconds")
+		return Config{}, errors.New("config: maxStaleSeconds must be at least twice mirrorIntervalSeconds")
 	}
 	if _, port, err := net.SplitHostPort(c.Listen); err != nil || port == "" || port == "0" {
 		return Config{}, fmt.Errorf("config: listen %q must be host:port", c.Listen)
@@ -143,7 +224,7 @@ func ParseConfig(data []byte) (Config, error) {
 		c.State = filepath.Join(filepath.Dir(c.Repo), "state.json")
 	}
 	if !filepath.IsAbs(c.HostKey) {
-		return Config{}, errors.New("config: host_key must be an absolute path")
+		return Config{}, errors.New("config: hostKey must be an absolute path")
 	}
 	if _, err := c.ClientKeys(); err != nil {
 		return Config{}, err
@@ -155,13 +236,13 @@ func ParseConfig(data []byte) (Config, error) {
 		c.CertDir = filepath.Join(filepath.Dir(c.Repo), "certs")
 	}
 	if !filepath.IsAbs(c.CertDir) {
-		return Config{}, errors.New("config: cert_dir must be an absolute path")
+		return Config{}, errors.New("config: certDir must be an absolute path")
 	}
 	if c.AcmeDirectory == "" {
 		c.AcmeDirectory = certs.LetsEncryptProduction
 	}
 	if !strings.HasPrefix(c.AcmeDirectory, "https://") && !strings.HasPrefix(c.AcmeDirectory, "http://") {
-		return Config{}, errors.New("config: acme_directory must be an http(s) URL")
+		return Config{}, errors.New("config: acmeDirectory must be an http(s) URL")
 	}
 	for name, owner := range c.Certs {
 		if !certs.NameRe.MatchString(name) {
@@ -175,7 +256,7 @@ func ParseConfig(data []byte) (Config, error) {
 		c.IPListDir = filepath.Join(filepath.Dir(c.Repo), "iplists")
 	}
 	if !filepath.IsAbs(c.IPListDir) {
-		return Config{}, errors.New("config: iplist_dir must be an absolute path")
+		return Config{}, errors.New("config: ipListDir must be an absolute path")
 	}
 	if err := c.checkIPLists(); err != nil {
 		return Config{}, err

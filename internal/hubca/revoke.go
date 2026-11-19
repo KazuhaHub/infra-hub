@@ -32,7 +32,7 @@ type Revocation struct {
 // enforces the list yet (see docs/ca.md).
 type RevocationList struct {
 	APIVersion string       `json:"apiVersion"`
-	Revoked    []Revocation `json:"revoked"` // sorted by serial
+	Revoked    []Revocation `json:"revoked"` // sorted by serial, ascending as numbers
 }
 
 // ParseRevocationList reads and validates a document.
@@ -53,6 +53,7 @@ func ParseRevocationList(data []byte) (*RevocationList, error) {
 		return nil, errors.New("revocation list: too many entries")
 	}
 	seen := map[string]bool{}
+	var prev *big.Int
 	for i := range l.Revoked {
 		r := &l.Revoked[i]
 		n, ok := new(big.Int).SetString(r.Serial, 16)
@@ -66,9 +67,10 @@ func ParseRevocationList(data []byte) (*RevocationList, error) {
 		if _, err := time.Parse(time.RFC3339, r.Time); err != nil {
 			return nil, fmt.Errorf("revocation list: serial %s: time: %w", r.Serial, err)
 		}
-		if i > 0 && l.Revoked[i-1].Serial >= r.Serial {
-			return nil, errors.New("revocation list: entries must be sorted by serial")
+		if prev != nil && prev.Cmp(n) >= 0 {
+			return nil, errors.New("revocation list: entries must be sorted by serial, ascending as numbers")
 		}
+		prev = n
 	}
 	return &l, nil
 }

@@ -3,6 +3,7 @@
 package httpsapi
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -106,6 +107,11 @@ func LoadServingCert(key *ecdsa.PrivateKey, certPath, caPath string, addresses [
 		} else if err := leaf.VerifyHostname(a); err != nil {
 			return nil, fmt.Errorf("hub certificate does not cover %s", a)
 		}
+	}
+	// The hub presents the whole chain: its certificate, any intermediates, and the CA certificate (public), so that an
+	// agent that holds only the CA pin can recognise the CA from what the hub sends (internal/hubtrust).
+	if !bytes.Equal(chain[len(chain)-1], ca.Raw) {
+		chain = append(chain, ca.Raw)
 	}
 	return &tls.Certificate{Certificate: chain, PrivateKey: key, Leaf: leaf}, nil
 }

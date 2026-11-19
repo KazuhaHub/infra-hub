@@ -132,6 +132,21 @@ func Pin(cert *x509.Certificate) string {
 	return "sha256//" + base64.StdEncoding.EncodeToString(sum[:])
 }
 
+// ParsePin checks the sha256//<base64> form and returns the 32-byte hash.
+func ParsePin(pin string) ([sha256.Size]byte, error) {
+	var out [sha256.Size]byte
+	b64, ok := strings.CutPrefix(pin, "sha256//")
+	if !ok {
+		return out, errors.New("a pin looks like sha256//<base64>")
+	}
+	raw, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil || len(raw) != sha256.Size {
+		return out, errors.New("a pin looks like sha256//<base64 of 32 bytes>")
+	}
+	copy(out[:], raw)
+	return out, nil
+}
+
 // PinOfKey is the same pin for a public key.
 func PinOfKey(pub crypto.PublicKey) (string, error) {
 	der, err := x509.MarshalPKIXPublicKey(pub)

@@ -44,10 +44,17 @@ The link between agents and hubs must not depend on any outside service, so it d
 - Every hub (primary, standbys) has its **own** key and a certificate for it signed by the hub CA. Adding a hub is one
   signature; no agent changes. A compromised hub is revoked alone (the revocation list, a JSON list of serials defined in `internal/hubca`, is part of
   the signed bundle; enforcing it is phase 4).
-- Agents verify the hub's TLS certificate against the pinned CA public key (`AGENT_HUB_CA` in `agent.env`), not against
-  the system roots and not by expiry of a public CA. Let's Encrypt, DNS or Cloudflare being down does not affect them.
-- Rotating the CA: the old CA signs the new CA's public key; agents learn it over the verified channel and add it, then
-  the old one is retired. No machine is touched by hand.
+- `agent.env` holds only the **CA pin**: `AGENT_HUB_CA_PIN=sha256//<base64 of the SHA-256 of the CA's SPKI>` (the
+  curl `--pinnedpubkey` format; one or, during a rotation, several comma-separated pins). The CA certificate itself is
+  public and is not stored on the machine.
+- The hub presents its **full chain**: its own certificate followed by the CA certificate. An agent builds its root pool
+  from the presented CA certificate only if the SPKI hash of that certificate equals a pin; the hub certificate must
+  then verify against it in the normal way (signature, validity, name constraints, server-authentication usage) and
+  must be valid for the address the agent connected to. System roots are never used, so Let's Encrypt, DNS or
+  Cloudflare being down does not affect the agents. A different CA certificate with the same subject does not match
+  the pin and is refused. The verifier is `internal/hubtrust`, written once for the agent.
+- Rotating the CA: the old CA signs the new CA's public key; agents learn the new pin over the verified channel and
+  add it to `AGENT_HUB_CA_PIN`, then the old one is retired. No machine is touched by hand.
 
 Certificates that the hub obtains **for the machines' own services** (DERP and so on) still come from Let's Encrypt,
 because those are used by the public.
@@ -58,12 +65,18 @@ Rackbook (or the owner) shows one command, in the same spirit as Beszel's agent 
 
 ```
 curl -fsSL --pinnedpubkey 'sha256//<hub key pin>' -k https://<hub address>:<port>/install \
-  | sudo sh -s -- --hub <address>[,<address>...] --hub-ca <CA public key>
+  | sudo sh -s -- --hub <address>[,<address>...] --hub-ca-pin 'sha256//<CA pin>'
+```
+
+(`--pinnedpubkey` takes the **hub's** key pin, which `infra-hub ca sign` prints for each hub certificate; the CA pin
+after `--hub-ca-pin` is the one `infra-hub ca init` printed.)
+
+```
 ```
 
 1. curl only talks to the hub whose key matches the pin, so the install script is authentic.
 2. The script downloads `infra-agent` from the hub (the hub serves the release it verified with Sigstore), writes
-   `agent.env`, and creates the age key.
+   `agent.env` (hub addresses and `AGENT_HUB_CA_PIN`), and creates the age key.
 3. It prints the age public key. Registering the machine is a reviewed change in the private infra repository (Rackbook
    opens it); once merged, the agent starts receiving bundles.
 
@@ -77,6 +90,9 @@ Reports go over HTTPS, authenticated by **challenge-response with the machine's 
 
 The nonce is single-use with a short TTL, so a captured report cannot be replayed. Only the holder of the age private
 key can read the nonce, so no password or token is stored on the machine.
+
+Only age X25519 recipients (`age1...`) are supported as a host's `agePublicKey`; plugin and post-quantum recipient
+types are rejected when the config is read.
 
 Implemented in phase 1: `POST /v1/challenge` (body `{"host":"<name>"}`) returns the age-armored ciphertext of a random
 32-byte nonce, encrypted to the host's `agePublicKey` from the hub config. `POST /v1/report` carries
@@ -126,5 +142,8 @@ version and falls back to it if the new one cannot report within N minutes.
 - A compromised network path sees only TLS traffic to a hub certified by the hub CA; replay of reports fails on the
   nonce.
 - A compromised hub certificate is revoked through the signed bundle; the other hubs keep working.
+- `/v1/challenge` needs no credential (the nonce is useless without the host's age key), so someone who knows a host
+  name and can send requests from many addresses can still crowd that host's real challenges out of the hub's limits
+  and delay its reports; the per-address and per-host limits make this expensive, not impossible.
 - A compromised machine can read only what is encrypted to its own age key.
 - The kick port carries no authority, so exposing it to the private network does not widen what an attacker can do.

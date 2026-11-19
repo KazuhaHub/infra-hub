@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/KazuhaHub/infra-hub/internal/hubca"
+	"github.com/KazuhaHub/infra-hub/internal/hubtrust"
 )
 
 func TestKeyIsCreatedOnceWithMode0600(t *testing.T) {
@@ -141,6 +142,23 @@ func TestHTTPSServesToAClientThatPinsTheCA(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&doc)
 	if resp.StatusCode != 200 || doc["status"] != "ok" || doc["apiVersion"] != "v1" || resp.TLS.Version != tls.VersionTLS13 {
 		t.Errorf("healthz: %d %v tls=%x", resp.StatusCode, doc, resp.TLS.Version)
+	}
+
+	// The hub presents its certificate and the CA certificate, so a client that holds only the CA pin trusts it.
+	if len(resp.TLS.PeerCertificates) != 2 || !resp.TLS.PeerCertificates[1].Equal(p.caCert) {
+		t.Errorf("presented chain has %d certificates, want hub + CA", len(resp.TLS.PeerCertificates))
+	}
+	byPin := hubtrust.Verifier{Pins: []string{hubca.Pin(p.caCert)}, Host: "127.0.0.1", Now: func() time.Time { return t0.Add(time.Hour) }}
+	pc := &http.Client{Transport: &http.Transport{TLSClientConfig: byPin.TLSConfig()}, Timeout: 5 * time.Second}
+	if r, err := get(pc, "/v1/healthz"); err != nil {
+		t.Errorf("client with only the CA pin: %v", err)
+	} else {
+		r.Body.Close()
+	}
+	byPin.Pins = []string{"sha256//" + strings.Repeat("A", 43) + "="}
+	pc = &http.Client{Transport: &http.Transport{TLSClientConfig: byPin.TLSConfig()}, Timeout: 5 * time.Second}
+	if _, err := get(pc, "/v1/healthz"); err == nil {
+		t.Error("client with the wrong CA pin trusted the hub")
 	}
 
 	// TLS 1.2 is refused.

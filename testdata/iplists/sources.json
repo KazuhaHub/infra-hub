@@ -16,7 +16,7 @@
       "prefixes[?service=='CLOUDFRONT' || service=='CLOUDFRONT_ORIGIN_FACING'].ip_prefix",
       "ipv6_prefixes[?service=='CLOUDFRONT' || service=='CLOUDFRONT_ORIGIN_FACING'].ipv6_prefix"
     ],
-    "max_bytes": 8388608
+    "maxBytes": 8388608
   },
   "github_hooks": {
     "url": "https://api.github.com/meta",

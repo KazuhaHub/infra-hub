@@ -31,9 +31,9 @@ func newHub(t *testing.T) hubDir {
 	_, key := testutil.NewKey(t)
 	cfg := map[string]any{
 		"listen": "127.0.0.1:11882", "repo": filepath.Join(dir, "infra.git"), "upstream": "git@example.invalid:x/infra.git",
-		"host_key": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": key},
-		"ip_sources": map[string]any{"cdn": map[string]any{"url": "https://example.invalid/ips", "format": "lines"}},
-		"ip_lists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}, "hosts": []string{"h1"}}},
+		"hostKey": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": key},
+		"ipSources": map[string]any{"cdn": map[string]any{"url": "https://example.invalid/ips", "format": "lines"}},
+		"ipLists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}, "hosts": []string{"h1"}}},
 	}
 	data, _ := json.Marshal(cfg)
 	path := filepath.Join(dir, "config.json")

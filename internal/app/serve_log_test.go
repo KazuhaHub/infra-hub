@@ -106,9 +106,9 @@ func TestServeLogHasNoSecrets(t *testing.T) {
 			os.WriteFile(tokenFile, []byte(cfToken+"\n"), 0o600)
 			cfgData, _ := json.Marshal(map[string]any{
 				"listen": addr, "repo": filepath.Join(dir, "infra.git"), "upstream": filepath.Join(dir, "no-such-upstream.git"),
-				"host_key": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": clientKey},
-				"certs": map[string]string{"stored.example.org": "h1", "new.example.org": "h1"}, "cloudflare_token_file": tokenFile,
-				"acme_directory": "https://127.0.0.1:1/directory",
+				"hostKey": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": clientKey},
+				"certs": map[string]string{"stored.example.org": "h1", "new.example.org": "h1"}, "cloudflareTokenFile": tokenFile,
+				"acmeDirectory": "https://127.0.0.1:1/directory",
 			})
 			cfg, err := config.ParseConfig(cfgData)
 			if err != nil {
