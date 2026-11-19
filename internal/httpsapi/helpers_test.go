@@ -2,14 +2,11 @@ package httpsapi
 
 import (
 	"bytes"
-	"crypto/ecdsa"
-	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"io"
 	"math/big"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,63 +16,10 @@ import (
 	"filippo.io/age"
 	"filippo.io/age/armor"
 
-	"github.com/KazuhaHub/infra-hub/internal/hubca"
 	"github.com/KazuhaHub/infra-hub/internal/state"
 )
 
 var t0 = time.Date(2026, 11, 19, 8, 0, 0, 0, time.UTC)
-
-// pki is a CA, a hub key and a signed hub certificate in a temp directory.
-type pki struct {
-	dir                       string
-	caCert                    *x509.Certificate
-	caKey                     *ecdsa.PrivateKey
-	caPath, certPath, keyPath string
-	key                       *ecdsa.PrivateKey
-	addresses                 []string
-}
-
-func newPKI(t *testing.T, addresses ...string) *pki {
-	t.Helper()
-	if len(addresses) == 0 {
-		addresses = []string{"127.0.0.1", "hub.example.org"}
-	}
-	p := &pki{dir: t.TempDir(), addresses: addresses}
-	if _, err := hubca.Init(filepath.Join(p.dir, "ca"), t0, hubca.Constraints{}); err != nil {
-		t.Fatal(err)
-	}
-	p.caPath = filepath.Join(p.dir, "ca", hubca.CertFile)
-	var err error
-	if p.caCert, err = hubca.ReadCertificate(p.caPath); err != nil {
-		t.Fatal(err)
-	}
-	if p.caKey, err = hubca.ReadPrivateKey(filepath.Join(p.dir, "ca", hubca.KeyFile)); err != nil {
-		t.Fatal(err)
-	}
-	p.keyPath = filepath.Join(p.dir, "hub-https.key")
-	if p.key, err = LoadOrCreateKey(p.keyPath); err != nil {
-		t.Fatal(err)
-	}
-	p.certPath = filepath.Join(p.dir, "hub.crt")
-	p.sign(t, p.certPath, p.caKey, p.caCert, p.key, addresses)
-	return p
-}
-
-// sign writes a certificate for key, signed by the given CA.
-func (p *pki) sign(t *testing.T, out string, caKey *ecdsa.PrivateKey, caCert *x509.Certificate, key *ecdsa.PrivateKey, names []string) {
-	t.Helper()
-	csr, err := hubca.NewCSR(key, names)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pemBytes, _, err := hubca.Sign(hubca.SignOptions{CAKey: caKey, CACert: caCert, CSRPEM: csr, Now: t0})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(out, pemBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
 
 // memStore is a ReportStore over a real State file.
 type memStore struct {

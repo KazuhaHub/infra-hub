@@ -145,29 +145,32 @@ func TestConfigClientsAndHTTPS(t *testing.T) {
 	}
 
 	clients := fmt.Sprintf(`{"a":%q}`, key)
-	goodHTTPS := `,"httpsAddresses":["192.0.2.10","hub.example.org"],"https":{"listen":"192.0.2.10:8443","cert":"/etc/infra-hub/hub.crt","caCert":"/etc/infra-hub/ca.crt"}`
+	goodHTTPS := `,"httpsAddresses":["192.0.2.10","hub.example.org"],"https":{"listen":"192.0.2.10:8443","key":"/etc/infra-hub/hub.key"}`
 	c, err = parse(clients, goodHTTPS)
-	if err != nil || c.HTTPS.Listen != "192.0.2.10:8443" || c.HTTPS.CACert != "/etc/infra-hub/ca.crt" || len(c.HTTPSAddresses) != 2 {
+	if err != nil || c.HTTPS.Listen != "192.0.2.10:8443" || c.HTTPS.Key != "/etc/infra-hub/hub.key" || len(c.HTTPSAddresses) != 2 {
 		t.Fatalf("good https: %+v %v", c.HTTPS, err)
 	}
-	if _, err := parse(clients, `,"httpsAddresses":["192.0.2.10"],"https":{"listen":"192.0.2.10:8443","caCert":"/etc/infra-hub/ca.crt"}`); err != nil {
-		t.Errorf("no cert yet must be allowed: %v", err)
-	}
 	for name, extra := range map[string]string{
-		"wildcard name":  strings.Replace(goodHTTPS, "hub.example.org", "*.example.org", 1),
-		"upper case":     strings.Replace(goodHTTPS, "hub.example.org", "Hub.Example.org", 1),
-		"duplicate":      strings.Replace(goodHTTPS, "hub.example.org", "192.0.2.10", 1),
-		"no port":        strings.Replace(goodHTTPS, "192.0.2.10:8443", "192.0.2.10", 1),
-		"port 0":         strings.Replace(goodHTTPS, "192.0.2.10:8443", "192.0.2.10:0", 1),
-		"no CA":          strings.Replace(goodHTTPS, `,"caCert":"/etc/infra-hub/ca.crt"`, "", 1),
-		"relative CA":    strings.Replace(goodHTTPS, "/etc/infra-hub/ca.crt", "ca.crt", 1),
-		"relative cert":  strings.Replace(goodHTTPS, "/etc/infra-hub/hub.crt", "hub.crt", 1),
-		"no addresses":   `,"https":{"listen":"192.0.2.10:8443","caCert":"/etc/infra-hub/ca.crt"}`,
-		"cert no listen": `,"https":{"cert":"/etc/infra-hub/hub.crt"}`,
-		"unknown https":  strings.Replace(goodHTTPS, `"listen"`, `"x":1,"listen"`, 1),
+		"wildcard name": strings.Replace(goodHTTPS, "hub.example.org", "*.example.org", 1),
+		"upper case":    strings.Replace(goodHTTPS, "hub.example.org", "Hub.Example.org", 1),
+		"duplicate":     strings.Replace(goodHTTPS, "hub.example.org", "192.0.2.10", 1),
+		"no port":       strings.Replace(goodHTTPS, "192.0.2.10:8443", "192.0.2.10", 1),
+		"port 0":        strings.Replace(goodHTTPS, "192.0.2.10:8443", "192.0.2.10:0", 1),
+		"no key":        strings.Replace(goodHTTPS, `,"key":"/etc/infra-hub/hub.key"`, "", 1),
+		"relative key":  strings.Replace(goodHTTPS, "/etc/infra-hub/hub.key", "hub.key", 1),
+		"no addresses":  `,"https":{"listen":"192.0.2.10:8443","key":"/etc/infra-hub/hub.key"}`,
+		"key no listen": `,"https":{"key":"/etc/infra-hub/hub.key"}`,
+		"unknown https": strings.Replace(goodHTTPS, `"listen"`, `"x":1,"listen"`, 1),
 	} {
 		if _, err := parse(clients, extra); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+	// The old CA fields fail with an error that names the new one.
+	for _, old := range []string{`"caCert":"/etc/infra-hub/ca.crt"`, `"cert":"/etc/infra-hub/hub.crt"`} {
+		_, err := parse(clients, `,"httpsAddresses":["192.0.2.10"],"https":{"listen":"192.0.2.10:8443","key":"/k",`+old+`}`)
+		if err == nil || !strings.Contains(err.Error(), "https.key") || !strings.Contains(err.Error(), "no longer used") {
+			t.Errorf("%s: %v", old, err)
 		}
 	}
 }

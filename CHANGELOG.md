@@ -4,13 +4,14 @@
 
 ### Added
 
-- Hub CA tooling for the owner's workstation: `infra-hub ca init --out <dir>` (ECDSA P-256 key, 20-year CA
-  certificate, optional `--permit-ip` / `--permit-dns` name constraints, prints the `sha256//...` pin),
-  `ca sign` (signs a hub's request; only IP and DNS names) and `ca pin`. The revocation list file format is defined
-  and parsed (`internal/hubca`); nothing enforces it yet. See docs/ca.md.
-- The hub's HTTPS identity: its own ECDSA P-256 key in the state directory, a certificate request (`hub.csr`,
-  `infra-hub https csr`) with the names of `httpsAddresses`, and an HTTPS listener (`https.listen`, TLS 1.3 only) that
-  starts only with a certificate that matches the key, covers the configured names and chains to `https.caCert`.
+- The hub identity key: one Ed25519 key shared by every hub, whose pin (`sha256//...`) is all an agent needs.
+  `infra-hub key init --out <path>` generates it (refuses to overwrite) and prints the pin, `key pin --key <path>`
+  prints it again, and `token --key <path> --hub <url>...` prints the one-line `ih1.` token for an agent install (public
+  pins and hub URLs only, no secret). `-o json` is supported. See docs/hub-key.md.
+- An HTTPS listener (`https.listen`, TLS 1.3 only) that serves a self-signed certificate built in memory at start from
+  the key at `https.key` (SAN from `httpsAddresses`, valid until 9999-12-31): no certificate files, nothing to renew.
+  `internal/hubtrust` accepts a hub if and only if its leaf's public-key hash matches a configured pin (several pins
+  allow a rotation); chain, expiry and host name are ignored. `internal/jointoken` encodes and decodes the token.
 - HTTPS endpoints: `GET /v1/healthz`, `POST /v1/challenge` (an age-encrypted single-use nonce for a registered host,
   rate limited) and `POST /v1/report` (the answer to the challenge plus a small, validated report). The latest report
   of each host is stored in the state and shown by `status -o json` as `hosts[].report`.
@@ -21,8 +22,6 @@
 - Config keys are camelCase: `hostKey`, `mirrorIntervalSeconds`, `maxStaleSeconds`, `certDir`, `acmeDirectory`,
   `acmeEmail`, `cloudflareTokenFile`, `ipSources` (`maxBytes` in a source), `ipLists`, `ipListDir`. The snake_case
   spellings are accepted for one release with a warning naming the new key; setting both spellings of a key is an error.
-- The hub presents its certificate and the CA certificate; `internal/hubtrust` verifies such a chain against a CA pin
-  (for the agent).
 - The command line is built with cobra: `infra-hub serve`, `status`, `iplist accept <provider>`,
   `iplist history <list> [--limit N]` and `version`, plus `--version`. Flags are `--long-name` and can come from
   `INFRA_HUB_<NAME>` environment variables. Exit codes are 0, 1, 2 (usage) and 3 (not ready).

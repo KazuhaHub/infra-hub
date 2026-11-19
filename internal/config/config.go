@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -17,9 +18,11 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
-	"github.com/KazuhaHub/infra-hub/internal/hubca"
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
 )
+
+// dnsNameRe is a plain, lower-case DNS name (no wildcard, no trailing dot).
+var dnsNameRe = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // repoName is the only repository the hub serves; clients use ssh://infra@<hub>:<port>/infra.git.
 const repoName = "infra.git"
@@ -74,11 +77,9 @@ type Config struct {
 type HTTPS struct {
 	// Listen is host:port. Empty: HTTPS is off.
 	Listen string `json:"listen"`
-	// Cert is the path of the hub certificate, signed by the hub CA. If it is empty or the file is missing the hub
-	// writes a certificate request and does not serve HTTPS (SSH is unaffected).
-	Cert string `json:"cert"`
-	// CACert is the hub CA certificate the hub certificate must chain to.
-	CACert string `json:"caCert"`
+	// Key is the path of the hub identity key (Ed25519, PKCS#8 PEM, mode 0600), the same on every hub. The hub builds
+	// its self-signed certificate from it at every start (docs/hub-key.md).
+	Key string `json:"key"`
 }
 
 // Client is one host: the SSH key it connects with today and the age public key it answers challenges with.
@@ -161,6 +162,16 @@ func normalizeKeys(data []byte) ([]byte, error) {
 	}
 	if err := renameDeprecated(top, deprecatedKeys, ""); err != nil {
 		return nil, err
+	}
+	if raw, ok := top["https"]; ok {
+		var h map[string]json.RawMessage
+		if json.Unmarshal(raw, &h) == nil {
+			for _, old := range []string{"caCert", "cert"} {
+				if _, ok := h[old]; ok {
+					return nil, fmt.Errorf("config: https.%s is no longer used: the hub serves a self-signed certificate made from its identity key; remove it and set https.key to the path of the key (docs/hub-key.md)", old)
+				}
+			}
+		}
 	}
 	if raw, ok := top["ipSources"]; ok {
 		var sources map[string]map[string]json.RawMessage
@@ -280,7 +291,7 @@ func (c *Config) checkHTTPS() error {
 	}
 	seen := map[string]bool{}
 	for _, a := range c.HTTPSAddresses {
-		if ip, err := netip.ParseAddr(a); (err != nil && !hubca.DNSNameRe.MatchString(a)) || (err == nil && ip.Zone() != "") {
+		if ip, err := netip.ParseAddr(a); (err != nil && !dnsNameRe.MatchString(a)) || (err == nil && ip.Zone() != "") {
 			return fmt.Errorf("config: httpsAddresses: %q is neither an IP address nor a plain lower-case DNS name", a)
 		}
 		if seen[a] {
@@ -290,19 +301,16 @@ func (c *Config) checkHTTPS() error {
 	}
 	h := c.HTTPS
 	if h.Listen == "" {
-		if h.Cert != "" || h.CACert != "" {
-			return errors.New("config: https.cert or https.caCert is set but https.listen is not")
+		if h.Key != "" {
+			return errors.New("config: https.key is set but https.listen is not")
 		}
 		return nil
 	}
 	if _, port, err := net.SplitHostPort(h.Listen); err != nil || port == "" || port == "0" {
 		return fmt.Errorf("config: https.listen %q must be host:port", h.Listen)
 	}
-	if h.CACert == "" || !filepath.IsAbs(h.CACert) {
-		return errors.New("config: https.caCert must be an absolute path when https.listen is set")
-	}
-	if h.Cert != "" && !filepath.IsAbs(h.Cert) {
-		return errors.New("config: https.cert must be an absolute path")
+	if h.Key == "" || !filepath.IsAbs(h.Key) {
+		return errors.New("config: https.key must be an absolute path when https.listen is set")
 	}
 	if len(c.HTTPSAddresses) == 0 {
 		return errors.New("config: httpsAddresses is empty but https.listen is set")

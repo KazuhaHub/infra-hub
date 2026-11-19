@@ -5,10 +5,10 @@ the next changes build towards.
 
 | Phase | Content | State |
 | --- | --- | --- |
-| 1 | Hub side: CA tooling, hub HTTPS identity, `/v1/healthz`, `/v1/challenge`, `/v1/report`, reports in `status` | done |
+| 1 | Hub side: hub identity key and token, HTTPS, `/v1/healthz`, `/v1/challenge`, `/v1/report`, reports in `status` | done |
 | 2 | `infra-agent`: challenge-response client, report sender, polling | open |
 | 3 | `/v1/bundle`, certificates and IP lists over HTTPS, install script, kick, self-update | open |
-| 4 | Revocation list enforced (agent side), CA rotation, SSH removed | open |
+| 4 | Hub key rotation across agents, SSH removed | open |
 
 ## Goals
 
@@ -34,49 +34,48 @@ the next changes build towards.
   lego `ObtainForCSR` and returns only the public certificate chain. The hub never holds a machine's private key.
 - **IP lists.** Signed by a hub signing key whose public half is part of the signed bundle.
 
-## Hub identity (no public CA needed)
+## Hub identity (a pinned key, no CA)
 
-The link between agents and hubs must not depend on any outside service, so it does not use Let's Encrypt:
+The link between agents and hubs must not depend on any outside service, so it does not use Let's Encrypt, and there is
+no CA of our own either. It works like an SSH host key:
 
-- A small **hub CA** (an ECDSA P-256 key: it is the curve every TLS client and curl build supports) is the only thing agents trust. Its private key never lives on a server: it is kept
-  encrypted for the owner only and is used on the owner's workstation to sign hub certificates (`infra-hub ca`, see [ca.md](ca.md)). The CA can carry a
-  critical name constraint, so that even a stolen CA key can only certify the fleet's own addresses.
-- Every hub (primary, standbys) has its **own** key and a certificate for it signed by the hub CA. Adding a hub is one
-  signature; no agent changes. A compromised hub is revoked alone (the revocation list, a JSON list of serials defined in `internal/hubca`, is part of
-  the signed bundle; enforcing it is phase 4).
-- `agent.env` holds only the **CA pin**: `AGENT_HUB_CA_PIN=sha256//<base64 of the SHA-256 of the CA's SPKI>` (the
-  curl `--pinnedpubkey` format; one or, during a rotation, several comma-separated pins). The CA certificate itself is
-  public and is not stored on the machine.
-- The hub presents its **full chain**: its own certificate followed by the CA certificate. An agent builds its root pool
-  from the presented CA certificate only if the SPKI hash of that certificate equals a pin; the hub certificate must
-  then verify against it in the normal way (signature, validity, name constraints, server-authentication usage) and
-  must be valid for the address the agent connected to. System roots are never used, so Let's Encrypt, DNS or
-  Cloudflare being down does not affect the agents. A different CA certificate with the same subject does not match
-  the pin and is refused. The verifier is `internal/hubtrust`, written once for the agent.
-- Rotating the CA: the old CA signs the new CA's public key; agents learn the new pin over the verified channel and
-  add it to `AGENT_HUB_CA_PIN`, then the old one is retired. No machine is touched by hand.
+- There is one **hub identity key** (Ed25519, PKCS#8 PEM), the same on every hub (primary and standbys), so all hubs
+  have one fingerprint. It is generated once (`infra-hub key init`, see [hub-key.md](hub-key.md)), kept in SOPS for the
+  hubs and the admin, and deployed to the path `https.key` in each hub's config (mode 0600).
+- At start the hub builds a **self-signed certificate** from the key in memory: SAN = `httpsAddresses`, NotBefore =
+  now minus one hour, NotAfter = 9999-12-31T23:59:59Z (RFC 5280: "no well-defined expiration"), TLS 1.3 only. There
+  are no certificate files, no renewal, and nothing that expires and interrupts agents.
+- An agent holds a list of **pins**, `sha256//<base64 of the SHA-256 of the SPKI>` (the curl `--pinnedpubkey` format).
+  It accepts a connection if and only if the leaf certificate's SubjectPublicKeyInfo hash equals one of the pins. It
+  ignores the chain, the dates and the host name: the pin is the trust. System roots are never used, so Let's Encrypt,
+  DNS or Cloudflare being down does not affect the agents. The verifier is `internal/hubtrust`.
+- `infra-hub token --key K --hub URL...` prints one line for the agent install, `ih1.` plus base64url of
+  `{"v":1,"pins":["sha256//..."],"hubs":["https://host:port",...]}` (`internal/jointoken`). It holds no secret.
+- Rotating: give the agents the new pin first (the list holds both), then switch the hubs to the new key, then drop the
+  old pin. No machine is touched by hand.
+
+Why this is acceptable: the config bundle is signed by infra's CI and age-encrypted to each host, so hub TLS is a second
+layer on top of end-to-end protection, not the only one. A stolen hub key lets someone impersonate a hub (to read what
+agents send it, or to withhold and delay updates) but not inject configuration: a bundle they forge fails the
+signature check, and they cannot read secrets that are not encrypted to them.
 
 Certificates that the hub obtains **for the machines' own services** (DERP and so on) still come from Let's Encrypt,
 because those are used by the public.
 
 ## Installing an agent (one command)
 
-Rackbook (or the owner) shows one command, in the same spirit as Beszel's agent install:
+Rackbook (or the owner) shows one command, in the same spirit as Beszel's agent install, with the token from
+`infra-hub token`:
 
 ```
-curl -fsSL --pinnedpubkey 'sha256//<hub key pin>' -k https://<hub address>:<port>/install \
-  | sudo sh -s -- --hub <address>[,<address>...] --hub-ca-pin 'sha256//<CA pin>'
+curl -fsSL -k --pinnedpubkey 'sha256//<hub pin>' https://<hub address>:<port>/install | sudo sh -s -- <token>
 ```
 
-(`--pinnedpubkey` takes the **hub's** key pin, which `infra-hub ca sign` prints for each hub certificate; the CA pin
-after `--hub-ca-pin` is the one `infra-hub ca init` printed.)
-
-```
-```
-
-1. curl only talks to the hub whose key matches the pin, so the install script is authentic.
+1. curl only talks to a hub whose key matches the pin (the one in the token; `-k` only switches off the certificate
+   chain check that cannot succeed for a self-signed certificate, the pin check stays), so the install script is
+   authentic. There is no CA pin any more.
 2. The script downloads `infra-agent` from the hub (the hub serves the release it verified with Sigstore), writes
-   `agent.env` (hub addresses and `AGENT_HUB_CA_PIN`), and creates the age key.
+   `agent.env` (hub URLs and pins from the token, `AGENT_HUB_PINS`), and creates the age key.
 3. It prints the age public key. Registering the machine is a reviewed change in the private infra repository (Rackbook
    opens it); once merged, the agent starts receiving bundles.
 
@@ -102,9 +101,8 @@ validated (`appliedCommit`, `result` ok or failed, `message`, `time`, `features[
 host is stored in the hub's state and appears in `infra-hub status -o json` as `hosts[].report`. Errors are
 `401 bad_nonce`, `400 bad_report`, `413 too_large`, `429 rate_limited`, `404 unknown_host`.
 
-The hub serves HTTPS (TLS 1.3 only) only with a certificate that matches its own key, covers the names in
-`httpsAddresses` and chains to the configured CA certificate; otherwise it logs an error, keeps writing nothing but the
-certificate request `hub.csr`, and serves SSH as before.
+The hub serves HTTPS (TLS 1.3 only) when `https.listen` is set, with the self-signed certificate it builds from
+`https.key`; if the key cannot be read it logs an error, serves no HTTPS and keeps serving SSH as before.
 
 ## Polling and kicking
 
@@ -139,9 +137,10 @@ version and falls back to it if the new one cannot report within N minutes.
 
 - A compromised hub can withhold or delay updates and can see report contents it is sent, but it cannot forge a config
   bundle (signature) or read secrets not encrypted to it, and it never holds machine certificate keys.
-- A compromised network path sees only TLS traffic to a hub certified by the hub CA; replay of reports fails on the
+- A compromised network path sees only TLS traffic to a hub that holds the pinned key; replay of reports fails on the
   nonce.
-- A compromised hub certificate is revoked through the signed bundle; the other hubs keep working.
+- The hub identity key is shared by all hubs, so a leak of it from one hub is a leak for all: rotate it (agents first).
+  The holder can impersonate a hub but cannot inject configuration (see above).
 - `/v1/challenge` needs no credential (the nonce is useless without the host's age key), so someone who knows a host
   name and can send requests from many addresses can still crowd that host's real challenges out of the hub's limits
   and delay its reports; the per-address and per-host limits make this expensive, not impossible.

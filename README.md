@@ -33,12 +33,10 @@ infra-hub serve                                   run the hub
 infra-hub status [-o json] [--no-refs]            mirror, hosts, certificates, IP lists
 infra-hub iplist accept <provider>                apply a held IP list update
 infra-hub iplist history <list> [--limit N]       change history of a list (JSON)
-infra-hub https csr                               print the hub's certificate request (creates its TLS key)
-infra-hub ca init --out <dir> [--permit-ip CIDR] [--permit-dns DOMAIN]
-                                                  create the hub CA (workstation only); prints the CA pin
-infra-hub ca sign --ca-key K --ca-cert C --csr hub.csr --out hub.crt [--days 825]
-                                                  sign a hub's request (IP and DNS names only)
-infra-hub ca pin --cert C                         print the sha256// pin of a certificate's key
+infra-hub key init --out <path>                   generate the hub identity key (once); prints its pin
+infra-hub key pin --key <path>                    print the sha256// pin of a key
+infra-hub token --key <path> --hub <url> [--hub <url>...]
+                                                  print the one-line token for an agent install (no secret in it)
 infra-hub version                                 also: infra-hub --version
 ```
 
@@ -57,7 +55,7 @@ Deprecated, removed in the next release: the old spellings `-config`, `-no-refs`
 snake_case JSON (also available as the hidden `--format legacy`) unless `-o` is given.
 
 - **HTTPS for agents.** With `https.listen` set the hub also serves `GET /v1/healthz`, `POST /v1/challenge` and
-  `POST /v1/report` over TLS 1.3, using a certificate signed by the hub CA (see [docs/ca.md](docs/ca.md)). A host
+  `POST /v1/report` over TLS 1.3, using a self-signed certificate built from the hub identity key, which agents pin (see [docs/hub-key.md](docs/hub-key.md)). A host
   proves it holds its age key by decrypting a single-use nonce; its latest report shows up in `status -o json` under
   `hosts[].report`. SSH is unchanged.
 
@@ -73,18 +71,17 @@ examples):
   "httpsAddresses": ["192.0.2.10", "hub.example.org"],
   "https": {
     "listen": "192.0.2.10:8443",
-    "cert": "/etc/infra-hub/hub.crt",
-    "caCert": "/etc/infra-hub/ca.crt"
+    "key": "/etc/infra-hub/hub.key"
   }
 }
 ```
 
 A client is either its SSH public key as a string (the old form) or an object with `sshKey` and an optional
-`agePublicKey` (a host without one gets no challenge). Only age X25519 keys (`age1...`) are supported. On the first start with `httpsAddresses` the hub creates its
-TLS key (`hub-https.key`, mode 0600) next to its state file and, while there is no usable certificate, writes
-`hub.csr`; `infra-hub https csr` prints the same request. Sign it on your workstation, place the certificate at
-`https.cert`, and the hub starts serving HTTPS within about 30 seconds, without a restart. The hub presents its
-certificate followed by the CA certificate; an agent needs only the CA pin (`internal/hubtrust`).
+`agePublicKey` (a host without one gets no challenge). Only age X25519 keys (`age1...`) are supported. `https.key` is the
+hub identity key (Ed25519, PKCS#8 PEM, mode 0600), the same file on every hub. At start the hub builds a self-signed
+certificate from it in memory (names from `httpsAddresses`, valid until 9999-12-31); there are no certificate files and
+nothing to renew. An agent trusts a hub if and only if the key matches its pin (`internal/hubtrust`). The earlier
+`https.cert` and `https.caCert` are gone and make the config fail with an error that names `https.key`.
 
 ### Config keys are camelCase (migration)
 
@@ -116,8 +113,9 @@ internal/sshserver/  the SSH server: identity, host key, git upload-pack, cert a
 internal/gitmirror/  the read-only git mirror
 internal/certs/      certificate store, renewal, ACME issuer
 internal/iplists/    IP list collection, validation, history
-internal/hubca/      the hub CA: init, sign, pin, revocation list format
-internal/hubtrust/   how an agent verifies a hub's certificate chain against the CA pin
+internal/hubkey/     the hub identity key: generate, read, pin, the in-memory self-signed certificate
+internal/hubtrust/   how an agent decides to trust a hub: the leaf's key hash must match a pin
+internal/jointoken/  the one-line join token (`ih1.` + pins and hub URLs)
 internal/httpsapi/   the hub's TLS identity and the /v1 HTTPS endpoints
 internal/config/     the config file
 internal/state/      per-host last-seen state
