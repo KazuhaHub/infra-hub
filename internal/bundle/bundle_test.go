@@ -39,6 +39,11 @@ func TestParseStatementGood(t *testing.T) {
 	if _, err := ParseStatement([]byte(strings.Replace(goodText(), "size 1234", "size 0", 1))); err != nil {
 		t.Errorf("size 0: %v", err)
 	}
+	for _, tm := range []string{"1", "8589934591"} {
+		if _, err := ParseStatement([]byte(strings.Replace(goodText(), "time 1790000000", "time "+tm, 1))); err != nil {
+			t.Errorf("time %s: %v", tm, err)
+		}
+	}
 }
 
 func TestParseStatementRefusals(t *testing.T) {
@@ -91,7 +96,8 @@ func TestParseStatementRefusals(t *testing.T) {
 		"time hex":             rep("time 1790000000", "time 0x10"),
 		"time letters":         rep("time 1790000000", "time soon"),
 		"time huge":            rep("time 1790000000", "time 99999999999999999999"),
-		"time out of range":    rep("time 1790000000", "time 100000000000"),
+		"time out of range":    rep("time 1790000000", "time 8589934592"),
+		"time zero":            rep("time 1790000000", "time 0"),
 		"size negative":        rep("size 1234", "size -5"),
 		"size leading zero":    rep("size 1234", "size 0123"),
 		"size underscore":      rep("size 1234", "size 1_234"),
@@ -216,5 +222,31 @@ func TestLoad(t *testing.T) {
 	testutil.RunGit(t, empty, "init", "-q", "--bare", ".")
 	if _, err := Load(context.Background(), empty, DefaultLimits); !errors.Is(err, ErrNoBundle) {
 		t.Errorf("no branch: err = %v", err)
+	}
+}
+
+func TestArchiveErrorIsNoBundle(t *testing.T) {
+	f := Files{Statement: []byte("a"), Signature: []byte("b"), Tarball: []byte("c")}
+	for _, tm := range []time.Time{time.Unix(8589934592, 0), time.Unix(-1, 0)} {
+		if _, err := Archive(f, tm); !errors.Is(err, ErrNoBundle) {
+			t.Errorf("mtime %v: err = %v", tm, err)
+		}
+	}
+}
+
+func TestLoadStatementReadsOnlyTheStatement(t *testing.T) {
+	repo, _ := attestationRepo(t, map[string]string{"bundle": goodText()}) // no signature, no tarball
+	tip, err := Tip(context.Background(), repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st, err := LoadStatement(context.Background(), repo, tip, DefaultLimits); err != nil || st.Commit != goodCommit {
+		t.Errorf("LoadStatement: %+v %v", st, err)
+	}
+	if _, err := Inspect(context.Background(), repo, tip, DefaultLimits); !errors.Is(err, ErrNoBundle) {
+		t.Errorf("Inspect with missing files: %v", err)
+	}
+	if _, err := LoadStatement(context.Background(), repo, tip, Limits{Statement: 5}); !errors.Is(err, ErrNoBundle) {
+		t.Errorf("statement over limit: %v", err)
 	}
 }

@@ -51,7 +51,7 @@ var tipRe = regexp.MustCompile(`^[0-9a-f]{40}([0-9a-f]{24})?$`)
 // Tip returns the commit at the tip of main-attestation. It is cheap, so callers use it to decide whether a cached
 // bundle is still current.
 func Tip(ctx context.Context, repo string) (string, error) {
-	out, err := runGit(ctx, repo, 10*time.Second, 1<<10, "rev-parse", "--verify", "--quiet", AttestationRef+"^{commit}")
+	out, err := runGit(ctx, repo, 10*time.Second, 1<<10, 0, "rev-parse", "--verify", "--quiet", AttestationRef+"^{commit}")
 	if err != nil {
 		return "", noBundle("no main-attestation branch in the mirror")
 	}
@@ -98,24 +98,68 @@ func LoadAt(ctx context.Context, repo, tip string, lim Limits) (Loaded, error) {
 	return l, nil
 }
 
-func readBlob(ctx context.Context, repo, tip, name string, max int64) ([]byte, error) {
-	spec := tip + ":" + name // tip is hex and name is one of our constants
-	out, err := runGit(ctx, repo, 10*time.Second, 64, "cat-file", "-t", spec)
-	if err != nil || strings.TrimSpace(string(out)) != "blob" {
-		return nil, noBundle("%s is missing", name)
+// LoadStatement reads and parses only the statement file at tip (with its size check). It reads neither the signature
+// nor the tarball.
+func LoadStatement(ctx context.Context, repo, tip string, lim Limits) (Statement, error) {
+	if !tipRe.MatchString(tip) {
+		return Statement{}, noBundle("bad tip")
 	}
-	out, err = runGit(ctx, repo, 10*time.Second, 64, "cat-file", "-s", spec)
+	data, err := readBlob(ctx, repo, tip, StatementName, lim.Statement)
 	if err != nil {
-		return nil, noBundle("%s is missing", name)
+		return Statement{}, err
+	}
+	st, err := ParseStatement(data)
+	if err != nil {
+		return Statement{}, noBundle("%v", err)
+	}
+	return st, nil
+}
+
+// Inspect is LoadStatement plus a check that the signature and the tarball exist as files within their limits. It
+// reads no content of those two.
+func Inspect(ctx context.Context, repo, tip string, lim Limits) (Statement, error) {
+	st, err := LoadStatement(ctx, repo, tip, lim)
+	if err != nil {
+		return Statement{}, err
+	}
+	for _, f := range []struct {
+		name string
+		max  int64
+	}{{SignatureName, lim.Signature}, {TarballName, lim.Tarball}} {
+		if _, err := blobSize(ctx, repo, tip, f.name, f.max); err != nil {
+			return Statement{}, err
+		}
+	}
+	return st, nil
+}
+
+// blobSize checks that name at tip is a blob of at most max bytes and returns its size.
+func blobSize(ctx context.Context, repo, tip, name string, max int64) (int64, error) {
+	spec := tip + ":" + name // tip is hex and name is one of our constants
+	out, err := runGit(ctx, repo, 10*time.Second, 64, 0, "cat-file", "-t", spec)
+	if err != nil || strings.TrimSpace(string(out)) != "blob" {
+		return 0, noBundle("%s is missing", name)
+	}
+	out, err = runGit(ctx, repo, 10*time.Second, 64, 0, "cat-file", "-s", spec)
+	if err != nil {
+		return 0, noBundle("%s is missing", name)
 	}
 	size, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
 	if err != nil || size < 0 {
-		return nil, noBundle("%s has no size", name)
+		return 0, noBundle("%s has no size", name)
 	}
 	if size > max {
-		return nil, noBundle("%s is over its limit (%d bytes)", name, max)
+		return 0, noBundle("%s is over its limit (%d bytes)", name, max)
 	}
-	data, err := runGit(ctx, repo, time.Minute, max, "cat-file", "blob", spec)
+	return size, nil
+}
+
+func readBlob(ctx context.Context, repo, tip, name string, max int64) ([]byte, error) {
+	size, err := blobSize(ctx, repo, tip, name, max)
+	if err != nil {
+		return nil, err
+	}
+	data, err := runGit(ctx, repo, time.Minute, max, size, "cat-file", "blob", tip+":"+name)
 	if err != nil {
 		return nil, noBundle("%s cannot be read", name)
 	}
@@ -140,14 +184,17 @@ func (c *capWriter) Write(p []byte) (int, error) {
 	return c.buf.Write(p)
 }
 
-// runGit runs git with the hub's clean environment, a timeout and an output cap. Arguments are never interpreted by a
+// runGit (expect is the output size when known) runs git with the hub's clean environment, a timeout and an output cap. Arguments are never interpreted by a
 // shell.
-func runGit(ctx context.Context, repo string, timeout time.Duration, max int64, args ...string) ([]byte, error) {
+func runGit(ctx context.Context, repo string, timeout time.Duration, max, expect int64, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = gitmirror.GitEnv("GIT_DIR=" + repo)
 	out := &capWriter{max: max}
+	if expect > 0 {
+		out.buf.Grow(int(expect)) // one allocation of the right size: no doubling copies
+	}
 	cmd.Stdout = out
 	if err := cmd.Run(); err != nil {
 		return nil, err
@@ -166,14 +213,14 @@ func Archive(f Files, mtime time.Time) ([]byte, error) {
 	}{{StatementName, f.Statement}, {SignatureName, f.Signature}, {TarballName, f.Tarball}} {
 		h := &tar.Header{Typeflag: tar.TypeReg, Name: m.name, Mode: 0o644, Size: int64(len(m.data)), ModTime: mtime.UTC(), Format: tar.FormatUSTAR}
 		if err := tw.WriteHeader(h); err != nil {
-			return nil, err
+			return nil, noBundle("cannot build the archive: %v", err)
 		}
 		if _, err := io.Copy(tw, bytes.NewReader(m.data)); err != nil {
 			return nil, err
 		}
 	}
 	if err := tw.Close(); err != nil {
-		return nil, err
+		return nil, noBundle("cannot build the archive: %v", err)
 	}
 	return buf.Bytes(), nil
 }

@@ -58,7 +58,7 @@ func TestStatusShowsTheBundle(t *testing.T) {
 	// a broken bundle: the reason is shown
 	h2 := newHub(t)
 	h2.markMirrored(t)
-	h2.attestationMirror(t, map[string]string{"bundle": st, "bundle.sig": "s"})
+	h2.attestationMirror(t, map[string]string{"bundle.sig": "s", "bundle.tar.gz": "abc"})
 	_, out, _ = run(t, "status", "--config", h2.config, "-o", "json")
 	doc.Bundle = nil
 	json.Unmarshal([]byte(out), &doc)
@@ -66,7 +66,7 @@ func TestStatusShowsTheBundle(t *testing.T) {
 		t.Errorf("broken bundle: %v", doc.Bundle)
 	}
 	_, table, _ = run(t, "status", "--config", h2.config)
-	if !strings.Contains(table, "bundle:   none served (no_bundle: no bundle: bundle.tar.gz is missing)\n") {
+	if !strings.Contains(table, "bundle:   none served (no_bundle: no bundle: bundle is missing)\n") {
 		t.Errorf("table:\n%s", table)
 	}
 

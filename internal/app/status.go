@@ -109,11 +109,16 @@ func bundleStatus(ctx context.Context, cfg config.Config, in report.StatusInput)
 	if in.MirrorLastSuccess.IsZero() || in.Now.Sub(in.MirrorLastSuccess) > maxStale {
 		return &report.BundleInput{Reason: "stale_mirror", Message: "the mirror is out of date"}
 	}
-	l, err := bundle.Load(ctx, cfg.Repo, bundle.DefaultLimits)
+	// Only the statement is read: the tarball can be 64 MiB and `status` runs often.
+	tip, err := bundle.Tip(ctx, cfg.Repo)
+	var st bundle.Statement
+	if err == nil {
+		st, err = bundle.LoadStatement(ctx, cfg.Repo, tip, bundle.DefaultLimits)
+	}
 	if err != nil {
 		return &report.BundleInput{Reason: "no_bundle", Message: err.Error()}
 	}
-	return &report.BundleInput{Commit: l.Statement.Commit, Time: time.Unix(l.Statement.Time, 0)}
+	return &report.BundleInput{Commit: st.Commit, Time: time.Unix(st.Time, 0)}
 }
 
 func writeJSON(w io.Writer, v any) error {

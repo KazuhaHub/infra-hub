@@ -12,6 +12,9 @@
   The hub parses the statement strictly but does not verify the signature or the hash; the agent does. The format is in
   docs/bundle.md.
 - `internal/bundle`: `ParseStatement` (strict), the reader of the three files with size caps, and the archive writer.
+- The hub builds the archive once per tip and shares it between hosts, answers `If-None-Match` for the current tip from the cached
+  statement (no tarball read), and refuses a statement time outside 1..8589934591 with `no_bundle`. `status` reads only the
+  statement file.
 - `infra-hub status` shows the bundle the hub serves (`bundle` in `-o json`): its commit and time, or why none is served.
 
 ## v0.4.1

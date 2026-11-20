@@ -42,8 +42,8 @@ var (
 	numberRe = regexp.MustCompile(`^(0|[1-9][0-9]{0,17})$`)
 )
 
-// maxTime is year 5138; anything larger is not a plausible unix time.
-const maxTime = 99999999999
+// maxTime is the largest mtime a ustar header holds (11 octal digits); the statement time becomes the members' mtime.
+const maxTime = 8589934591
 
 // String renders the statement in the exact form ParseStatement accepts.
 func (s Statement) String() string {
@@ -106,8 +106,8 @@ func ParseStatement(data []byte) (Statement, error) {
 	}
 	s.Time, _ = strconv.ParseInt(vals[3], 10, 64)
 	s.Size, _ = strconv.ParseInt(vals[5], 10, 64)
-	if s.Time > maxTime {
-		return s, errors.New("statement time is out of range")
+	if s.Time < 1 || s.Time > maxTime {
+		return s, errors.New("statement time is out of range (1 to 8589934591)")
 	}
 	return s, nil
 }

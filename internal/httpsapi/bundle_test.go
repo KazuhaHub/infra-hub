@@ -291,7 +291,10 @@ func TestBundleCacheFollowsTheBranch(t *testing.T) {
 		t.Error("the same commit must be served from the cache (identical ciphertext)")
 	}
 	h.getBundle(t, "GET", "h2", nil)
-	if n := len(h.s.Bundles.cache); n != 2 {
+	if h.s.Bundles.builds != 1 {
+		t.Errorf("the archive was built %d times for two hosts, want once", h.s.Bundles.builds)
+	}
+	if n := h.s.Bundles.cachedEncrypted(); n != 2 {
 		t.Fatalf("cache holds %d entries, want 2", n)
 	}
 	// the branch moves
@@ -305,7 +308,7 @@ func TestBundleCacheFollowsTheBranch(t *testing.T) {
 		t.Error("the new statement is not served")
 	}
 	// the old commit's entry for h2 was dropped, not kept alongside
-	if n := len(h.s.Bundles.cache); n != 1 {
+	if n := h.s.Bundles.cachedEncrypted(); n != 1 {
 		t.Errorf("cache holds %d entries after the move, want 1", n)
 	}
 	// the old ETag no longer matches
@@ -319,7 +322,7 @@ func TestBundleCacheFollowsTheBranch(t *testing.T) {
 	if r := h.getBundle(t, "GET", "h1", nil); r.code != 503 {
 		t.Errorf("broken tip: %d", r.code)
 	}
-	if n := len(h.s.Bundles.cache); n != 0 {
+	if n := h.s.Bundles.cachedEncrypted(); n != 0 {
 		t.Errorf("cache holds %d entries for a broken tip", n)
 	}
 }
@@ -341,5 +344,43 @@ func TestBundleRateLimited(t *testing.T) {
 	}
 	if r := h.getBundleFrom(t, "198.51.100.8:1", "GET", "h1", nil); r.code != 200 {
 		t.Errorf("another address: %d", r.code)
+	}
+}
+
+func TestBundleNotModifiedNeedsNoFullLoad(t *testing.T) {
+	h := withBundles(t, newAttest(t, goodFiles(1)))
+	etag := `"` + c40(1) + `"`
+	if r := h.getBundle(t, "GET", "h1", map[string]string{"If-None-Match": etag}); r.code != 304 {
+		t.Fatalf("%d", r.code)
+	}
+	if h.s.Bundles.builds != 0 || h.s.Bundles.cur.archive != nil || h.s.Bundles.cachedEncrypted() != 0 {
+		t.Error("a 304 built or encrypted something")
+	}
+	// the tarball can no longer be read, but the parsed statement of this tip answers
+	h.s.Bundles.Limits = bundle.Limits{Tarball: 10, Statement: bundle.MaxStatement, Signature: bundle.MaxSignature}
+	if r := h.getBundle(t, "GET", "h1", map[string]string{"If-None-Match": etag}); r.code != 304 {
+		t.Errorf("warm 304: %d", r.code)
+	}
+	if r := h.getBundle(t, "GET", "h1", nil); r.code != 503 {
+		t.Errorf("full request over the limit: %d", r.code)
+	}
+}
+
+func TestBundleBadTimeIsNoBundle(t *testing.T) {
+	a := newAttest(t, goodFiles(1))
+	h := withBundles(t, a)
+	for _, tm := range []int64{0, 8589934592} {
+		f := goodFiles(2)
+		f["bundle"] = statementFor(c40(2), tm)
+		a.commit(f)
+		if r := h.getBundle(t, "GET", "h1", nil); r.code != 503 || errCodeOf(t, r) != "no_bundle" {
+			t.Errorf("time %d: %d", tm, r.code)
+		}
+	}
+	f := goodFiles(2)
+	f["bundle"] = statementFor(c40(2), 8589934591)
+	a.commit(f)
+	if r := h.getBundle(t, "GET", "h1", nil); r.code != 200 {
+		t.Errorf("largest time: %d", r.code)
 	}
 }
