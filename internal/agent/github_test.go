@@ -2,6 +2,7 @@ package agent
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -266,5 +267,35 @@ func TestGitHubLegacyFloor(t *testing.T) {
 	floor(p.Time) // a bundle signed at the applied time is that main or newer
 	if o := cycle(t, a); o.Result != ResultVerified {
 		t.Fatalf("at the floor: %+v", o)
+	}
+}
+
+func TestGitHubCorruptBlobAtUnchangedTip(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	p := w.Publish(agenttest.Options{})
+	a := githubAgent(t, w, ModeApply, w.MirrorRepo, agenttest.DeadURL(t))
+	if o := cycle(t, a); o.Result != ResultOK || o.AppliedCommit != p.Commit {
+		t.Fatalf("first %+v", o)
+	}
+	gd := githubDir(w.StateDir)
+	out, err := exec.Command("git", "--git-dir", gd, "rev-parse", "main-attestation:bundle.tar.gz").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.TrimSpace(string(out))
+	obj := filepath.Join(gd, "objects", id[:2], id[2:])
+	if err := os.Chmod(obj, 0o644); err != nil {
+		t.Fatalf("the blob is not a loose object: %v", err)
+	}
+	if err := os.WriteFile(obj, []byte("garbage"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// The tip is unchanged, so the fetch has nothing to do and reading the blob fails: the repository is rebuilt.
+	o := cycle(t, a)
+	if o.Result != ResultUnchanged || o.Hub != GitHubSource {
+		t.Fatalf("after corruption %+v", o)
+	}
+	if err := exec.Command("git", "--git-dir", gd, "cat-file", "-p", id).Run(); err != nil {
+		t.Errorf("the blob is still damaged: %v", err)
 	}
 }

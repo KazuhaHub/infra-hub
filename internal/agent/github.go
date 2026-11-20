@@ -38,12 +38,12 @@ func (e *githubBundleError) Unwrap() error { return e.err }
 
 // fetchGitHub fetches main-attestation from the configured repository and reads the three files at its tip. Nothing is
 // trusted yet: the caller runs the same checks as for a bundle from a hub. A killed git can leave lock files behind and a
-// repository can be damaged; the repository is only a cache, so after a failure that is not the bundle's fault it is
-// removed and the fetch is tried once more.
+// repository can be damaged (a damaged object at an unchanged tip looks like a bad tree); the repository is only a
+// cache, so after any failure it is removed and everything is tried once more. Only if that fails too is the error
+// reported (a githubBundleError means the bundle itself is bad).
 func (a *Agent) fetchGitHub(ctx context.Context) (bundle.Files, error) {
 	files, err := a.fetchGitHubOnce(ctx)
-	var be *githubBundleError
-	if err == nil || ctx.Err() != nil || errors.As(err, &be) {
+	if err == nil || ctx.Err() != nil {
 		return files, err
 	}
 	slog.Warn("GitHub fetch failed, starting again from an empty repository", "err", err)
