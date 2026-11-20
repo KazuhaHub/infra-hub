@@ -45,6 +45,8 @@ Commands:
 infra-agent run [--once]          run the cycle every interval (or once)
 infra-agent status [-o json]      applied and verified bundle, last result, last hub, last cycle
 infra-agent check-config          validate agent.env, the token and the key files; ask each hub for /v1/healthz
+infra-agent cert <name> [--hub URL] [--out-dir DIR]
+                                  fetch a certificate from the hubs, decrypt it with the age key
 infra-agent version
 ```
 
@@ -200,6 +202,33 @@ bundle from a hub, minus the decryption (the files are plain in git).
 `check-config` prints the fallback settings (or `github fallback: off`) and checks that the key and the known_hosts file
 can be read.
 
+## Fetching a certificate
+
+```
+infra-agent cert <name> [--hub URL] [--out-dir DIR]
+```
+
+Reads `agent.env` like the other commands (the token with its hubs and pins, `INFRA_AGENT_HOST`, the age key; the
+signers file and the state directory are not needed and the command takes no lock). For each hub of the token, in
+order (or only `--hub`, which must be one of them: exit 2 otherwise), it calls `GET /v1/cert/<host>/<name>` over the
+pinned TLS 1.3 connection, accepts at most 1 MiB plus the age overhead, decrypts the answer with the age key and checks
+that it is a JSON object with the string fields `name` (the name asked for), `fullchain`, `privkey` and `not_after`.
+The hub answers `404 not_found` for a name this host does not own and `503 not_serving` when the certificate is
+missing or too close to expiry.
+
+- **Without `--out-dir`** the first successful decrypted answer is printed on stdout (the JSON line, as `cert <name>`
+  printed over SSH) and the command exits 0. Reasons for hubs that failed go to stderr.
+- **With `--out-dir DIR`** every hub is asked, and for the hub at position `i` of the token (0-based) the command writes
+  `DIR/<i>.json` (the decrypted answer) or `DIR/<i>.err` (a one-line reason). The directory is opened with
+  `openat2` and `RESOLVE_NO_SYMLINKS` (a symlink anywhere in the path is refused), the stale `<i>.json` and `<i>.err`
+  of every hub of the token are removed first, also with `--hub` (a symlink
+  in their place is unlinked, never followed), and each file is created with `O_EXCL` under a temporary name in the
+  directory, set to mode 0600 and to the directory's owner and group, synced and renamed into place. A file
+  that cannot be written is reported on stderr and the other hubs are still handled.
+
+Exit codes: 0 when at least one `.json` was written (or, without `--out-dir`, a hub answered), 1 when none was, 2 for a configuration or usage error (a name that is
+not a DNS name, `--hub` not in the token, an unusable `--out-dir`).
+
 ## Verify and apply mode
 
 `verify` (the default) does everything up to and including extraction and reports `verified`, but never runs ansible. It is
@@ -263,4 +292,4 @@ The example unit is [infra-agent.service](infra-agent.service).
 - An install script (`curl ... | sudo sh -s -- <token>`, see design.md) that writes `agent.env` and creates the age key.
   There is none yet: the files are placed by hand.
 - Self-update from the signed releases, with fallback to the previous version.
-- Certificates and IP lists over HTTPS, the kick port, alert mail (design.md, phase 3).
+- IP lists in the agent (the hub serves them at `GET /v1/iplist/<name>`), the CSR model for certificates, the kick port, alert mail (design.md, phase 3).

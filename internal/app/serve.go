@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/config"
@@ -47,9 +50,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	signer, err := sshserver.LoadOrCreateHostKey(cfg.HostKey)
-	if err != nil {
-		return err
+	var signer ssh.Signer
+	if cfg.SSHEnabled() {
+		if signer, err = sshserver.LoadOrCreateHostKey(cfg.HostKey); err != nil {
+			return err
+		}
 	}
 	slog.Info("starting", "version", version.Version)
 	st, err := state.LoadState(cfg.State)
@@ -80,9 +85,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 		}
 	}()
 
-	ln, err := net.Listen("tcp", cfg.Listen)
-	if err != nil {
-		return err
+	var ln net.Listener
+	if cfg.SSHEnabled() {
+		if ln, err = net.Listen("tcp", cfg.Listen); err != nil {
+			return err
+		}
 	}
 	var certMgr *certs.CertManager
 	issuing := false
@@ -113,18 +120,26 @@ func serve(ctx context.Context, cfg config.Config) error {
 		go ipm.Run(ctx) // refreshes the providers and applies accepted changes
 	}
 
-	slog.Info("listening", "addr", ln.Addr().String(), "hostKey", sshserver.SignerFingerprint(signer.PublicKey()), "clients", len(keys))
+	var srv *sshserver.Server
+	var httpsDone chan struct{}
+	if cfg.SSHEnabled() {
+		slog.Info("listening", "addr", ln.Addr().String(), "hostKey", sshserver.SignerFingerprint(signer.PublicKey()), "clients", len(keys))
+		srv = sshserver.NewServer(sshserver.NewSSHKeyIdentifier(keys), st, signer, cfg.Repo, func(ctx context.Context) (map[string]string, error) {
+			return gitmirror.ReadRefs(ctx, cfg.Repo)
+		})
+		if certMgr != nil {
+			srv.Certs = certMgr
+		}
+		if ipm != nil {
+			srv.IPLists = ipm
+		}
+		maxStale := time.Duration(cfg.MaxStaleSeconds) * time.Second
+		srv.Fresh = func() error { return mirror.Fresh(maxStale) }
+	} else {
+		slog.Info("ssh is off: no listen address in the config")
+	}
 	if issuing {
 		go certMgr.Run(ctx) // only once the listener is up
-	}
-	srv := sshserver.NewServer(sshserver.NewSSHKeyIdentifier(keys), st, signer, cfg.Repo, func(ctx context.Context) (map[string]string, error) {
-		return gitmirror.ReadRefs(ctx, cfg.Repo)
-	})
-	if certMgr != nil {
-		srv.Certs = certMgr
-	}
-	if ipm != nil {
-		srv.IPLists = ipm
 	}
 	if cfg.HTTPS.Listen != "" {
 		key, err := hubkey.Read(cfg.HTTPS.Key)
@@ -132,18 +147,41 @@ func serve(ctx context.Context, cfg config.Config) error {
 		if err == nil {
 			pin, err = hubkey.Pin(key)
 		}
+		if err == nil && !cfg.SSHEnabled() {
+			_, err = hubkey.Certificate(key, cfg.HTTPSAddresses, time.Now())
+		}
 		if err != nil {
 			slog.Error("https is off: cannot use the hub identity key", "path", cfg.HTTPS.Key, "err", err)
+			if !cfg.SSHEnabled() {
+				return fmt.Errorf("https cannot start and ssh is off, so the hub would serve nothing: %w", err)
+			}
 		} else {
 			slog.Info("https identity", "pin", pin)
 			hs := httpsapi.NewServer(cfg.AgeRecipients(), st)
+			if certMgr != nil {
+				hs.Certs = certMgr
+			}
+			if ipm != nil {
+				hs.IPLists = ipm
+			}
 			hs.Bundles = &httpsapi.Bundles{Repo: cfg.Repo, Fresh: func() error { return mirror.Fresh(time.Duration(cfg.MaxStaleSeconds) * time.Second) }}
 			run := &httpsapi.Runner{Key: key, Addresses: cfg.HTTPSAddresses, Listen: cfg.HTTPS.Listen, Server: hs}
-			go run.Run(ctx)
+			httpsDone = make(chan struct{})
+			go func() { defer close(httpsDone); run.Run(ctx) }()
 		}
 	}
-	maxStale := time.Duration(cfg.MaxStaleSeconds) * time.Second
-	srv.Fresh = func() error { return mirror.Fresh(maxStale) }
+	if srv == nil {
+		// Without SSH the hub is its HTTPS server: if that ends before the hub is stopped, the process must not idle.
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-httpsDone:
+			if ctx.Err() != nil {
+				return nil
+			}
+			return errors.New("the https server stopped and ssh is off, so the hub serves nothing")
+		}
+	}
 	return srv.Serve(ctx, ln)
 }
 

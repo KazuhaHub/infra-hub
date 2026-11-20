@@ -25,8 +25,9 @@ const repoName = "infra.git"
 
 // Config is the hub's JSON config file (usually rendered by a configuration tool).
 type Config struct {
-	// Listen is the address to listen on, e.g. 192.0.2.10:11882. Any reachable address works; the hub does not
-	// depend on a particular network.
+	// Listen is the address of the SSH server, e.g. 192.0.2.10:11882. Any reachable address works; the hub does not
+	// depend on a particular network. Empty: the hub runs no SSH server (HTTPS only); hostKey and the clients' sshKey
+	// are then not needed.
 	Listen string `json:"listen"`
 	// Repo is the bare mirror; its last path element must be infra.git.
 	Repo string `json:"repo"`
@@ -34,7 +35,8 @@ type Config struct {
 	Upstream string `json:"upstream"`
 	// State is the JSON file with last-seen times (default: state.json next to the repo).
 	State string `json:"state"`
-	// HostKey is the hub's own SSH host key (private key file; generated on first start if missing).
+	// HostKey is the hub's own SSH host key (private key file; generated on first start if missing). Required when
+	// Listen is set.
 	HostKey string `json:"hostKey"`
 	// MirrorIntervalSeconds is how often the mirror fetches (default 60).
 	MirrorIntervalSeconds int `json:"mirrorIntervalSeconds"`
@@ -235,8 +237,10 @@ func ParseConfig(data []byte) (Config, error) {
 	if c.MaxStaleSeconds < 2*c.MirrorIntervalSeconds {
 		return Config{}, errors.New("config: maxStaleSeconds must be at least twice mirrorIntervalSeconds")
 	}
-	if _, port, err := net.SplitHostPort(c.Listen); err != nil || port == "" || port == "0" {
-		return Config{}, fmt.Errorf("config: listen %q must be host:port", c.Listen)
+	if c.Listen != "" {
+		if _, port, err := net.SplitHostPort(c.Listen); err != nil || port == "" || port == "0" {
+			return Config{}, fmt.Errorf("config: listen %q must be host:port", c.Listen)
+		}
 	}
 	if !filepath.IsAbs(c.Repo) || filepath.Base(c.Repo) != repoName {
 		return Config{}, fmt.Errorf("config: repo must be an absolute path ending in /%s", repoName)
@@ -247,7 +251,7 @@ func ParseConfig(data []byte) (Config, error) {
 	if c.State == "" {
 		c.State = filepath.Join(filepath.Dir(c.Repo), "state.json")
 	}
-	if !filepath.IsAbs(c.HostKey) {
+	if (c.Listen != "" || c.HostKey != "") && !filepath.IsAbs(c.HostKey) {
 		return Config{}, errors.New("config: hostKey must be an absolute path")
 	}
 	if _, err := c.ClientKeys(); err != nil {
@@ -255,6 +259,9 @@ func ParseConfig(data []byte) (Config, error) {
 	}
 	if err := c.checkHTTPS(); err != nil {
 		return Config{}, err
+	}
+	if c.Listen == "" && c.HTTPS.Listen == "" {
+		return Config{}, errors.New("config: neither listen (SSH) nor https.listen is set; the hub would serve nothing")
 	}
 	if c.CertDir == "" {
 		c.CertDir = filepath.Join(filepath.Dir(c.Repo), "certs")
@@ -389,9 +396,13 @@ func (c *Config) checkIPLists() error {
 	return nil
 }
 
-// ClientKeys parses the client keys; the same key for two names is an error (identity must be unambiguous).
+// SSHEnabled reports whether the hub runs an SSH server.
+func (c Config) SSHEnabled() bool { return c.Listen != "" }
+
+// ClientKeys parses the client keys; the same key for two names is an error (identity must be unambiguous). Without an
+// SSH server there may be no clients with an SSH key (or no clients at all).
 func (c Config) ClientKeys() (map[string]ssh.PublicKey, error) {
-	if len(c.Clients) == 0 {
+	if len(c.Clients) == 0 && c.SSHEnabled() {
 		return nil, errors.New("config: clients is empty")
 	}
 	keys := map[string]ssh.PublicKey{}
@@ -401,7 +412,7 @@ func (c Config) ClientKeys() (map[string]ssh.PublicKey, error) {
 			return nil, errors.New("config: a client has an empty name")
 		}
 		line := cl.SSHKey
-		if line == "" && cl.AgePublicKey != "" {
+		if line == "" && (cl.AgePublicKey != "" || !c.SSHEnabled()) {
 			continue // an age-only client: it has no SSH identity
 		}
 		key, _, _, rest, err := ssh.ParseAuthorizedKey([]byte(line))

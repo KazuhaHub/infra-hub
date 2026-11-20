@@ -16,8 +16,10 @@ import (
 
 	"filippo.io/age"
 
+	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/logx"
 	"github.com/KazuhaHub/infra-hub/internal/state"
+	"github.com/KazuhaHub/infra-hub/internal/version"
 )
 
 // APIVersion is carried by every document.
@@ -29,7 +31,7 @@ type ReportStore interface {
 	Flush() error
 }
 
-// Server answers /v1/healthz, /v1/challenge and /v1/report.
+// Server answers /v1/healthz, /v1/challenge, /v1/report, /v1/bundle, /v1/cert and /v1/iplist.
 type Server struct {
 	// Recipients maps a host name to its registered age public key; only these hosts get a challenge.
 	Recipients map[string]age.Recipient
@@ -38,9 +40,13 @@ type Server struct {
 	Rand       io.Reader
 	// Bundles serves /v1/bundle/<host>; nil means no bundles.
 	Bundles *Bundles
+	// Certs serves /v1/cert/<host>/<name>; nil means no certificates.
+	Certs certs.CertSource
+	// IPLists serves /v1/iplist/<name>; nil means no lists.
+	IPLists IPListProvider
 
-	nonces                                      *nonceStore
-	challengeHost, challengeIP, repIP, bundleIP *limiter
+	nonces                                                      *nonceStore
+	challengeHost, challengeIP, repIP, bundleIP, certIP, listIP *limiter
 }
 
 // NewServer returns a server with the default rate limits: a challenge is limited per host (60 a minute, burst 20) and
@@ -49,7 +55,7 @@ type Server struct {
 func NewServer(recipients map[string]age.Recipient, reports ReportStore) *Server {
 	return &Server{Recipients: recipients, Reports: reports, Now: time.Now, Rand: rand.Reader, nonces: newNonceStore(),
 		challengeHost: newLimiter(60, 20, 4096), challengeIP: newLimiter(12, 10, 16384), repIP: newLimiter(60, 20, 16384),
-		bundleIP: newLimiter(30, 20, 16384)}
+		bundleIP: newLimiter(30, 20, 16384), certIP: newLimiter(30, 10, 16384), listIP: newLimiter(60, 20, 16384)}
 }
 
 type errorBody struct {
@@ -92,6 +98,29 @@ func (s *Server) Handler() http.Handler {
 			s.bundle(w, r, host)
 			return
 		}
+		if rest, ok := strings.CutPrefix(r.URL.Path, "/v1/cert/"); ok {
+			if r.Method != http.MethodGet {
+				w.Header().Set("Allow", "GET")
+				writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
+				return
+			}
+			host, name, ok := strings.Cut(rest, "/")
+			if !ok || host == "" || name == "" || strings.Contains(name, "/") {
+				notFoundCert(w, host, name, remoteKey(r.RemoteAddr))
+				return
+			}
+			s.cert(w, r, host, name)
+			return
+		}
+		if name, ok := strings.CutPrefix(r.URL.Path, "/v1/iplist/"); ok {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", "GET, HEAD")
+				writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
+				return
+			}
+			s.iplist(w, r, name)
+			return
+		}
 		switch r.URL.Path {
 		case "/v1/healthz":
 			method, h = http.MethodGet, s.healthz
@@ -113,7 +142,7 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"apiVersion": APIVersion, "status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]string{"apiVersion": APIVersion, "status": "ok", "version": version.Version})
 }
 
 // readBody reads at most limit bytes; it answers 413 itself when the body is larger.

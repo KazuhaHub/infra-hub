@@ -10,12 +10,13 @@ import (
 
 	"github.com/KazuhaHub/infra-hub/internal/logx"
 	"github.com/KazuhaHub/infra-hub/internal/state"
+	"github.com/KazuhaHub/infra-hub/internal/version"
 )
 
 func TestHealthz(t *testing.T) {
 	h := newHub(t)
 	code, doc := h.do(t, "GET", "/v1/healthz", "")
-	if code != 200 || doc["apiVersion"] != "v1" || doc["status"] != "ok" || len(doc) != 2 {
+	if code != 200 || doc["apiVersion"] != "v1" || doc["status"] != "ok" || doc["version"] != version.Version || len(doc) != 3 {
 		t.Fatalf("%d %v", code, doc)
 	}
 	if code, doc := h.do(t, "POST", "/v1/healthz", ""); code != 405 || errCode(doc) != "method_not_allowed" {
