@@ -21,6 +21,15 @@ const ApplyTimeout = 25 * time.Minute
 // tests).
 var killGrace = 30 * time.Second
 
+// RestartFileEnv names the file, in ansible's environment, that a configuration run creates to ask the agent for a
+// restart (a new binary, settings or unit). A run that restarted the service itself would kill its own ansible halfway,
+// so it only creates this file; the agent sees it after the cycle, once the result is saved and reported, and exits so
+// that systemd starts it again (Restart=always).
+const RestartFileEnv = EnvPrefix + "RESTART_FILE"
+
+// RestartFile is the restart request file of a state directory.
+func RestartFile(stateDir string) string { return filepath.Join(stateDir, "restart-requested") }
+
 // ApplyError is an ansible run that ended badly; Message is short and safe to report (no ansible output).
 type ApplyError struct{ Message string }
 
@@ -29,7 +38,8 @@ func (e *ApplyError) Error() string { return e.Message }
 // Apply runs ansible for host in <release>/infra, in its own process group. The output goes to out (the journal under
 // systemd); it is never copied into a report, because a task could print something sensitive. When ctx ends or
 // ApplyTimeout passes, the group gets SIGTERM, and SIGKILL after killGrace: ansible's own children die with it.
-func Apply(ctx context.Context, ansible, release, host, ageKey string, out io.Writer) error {
+// restartFile is passed to ansible as RestartFileEnv.
+func Apply(ctx context.Context, ansible, release, host, ageKey, restartFile string, out io.Writer) error {
 	dir := filepath.Join(release, "infra")
 	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
 		return &ApplyError{Message: "the release has no infra/ directory"}
@@ -38,7 +48,7 @@ func Apply(ctx context.Context, ansible, release, host, ageKey string, out io.Wr
 	defer cancel()
 	cmd := exec.Command(ansible, "-i", "inventory/hosts.yml", "--limit", host, "site.yml")
 	cmd.Dir = dir
-	cmd.Env = applyEnv(os.Environ(), ageKey)
+	cmd.Env = applyEnv(os.Environ(), ageKey, restartFile)
 	cmd.Stdout, cmd.Stderr = out, out
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
@@ -88,14 +98,15 @@ func killGroup(pgid int, sig syscall.Signal) bool {
 	return syscall.Kill(-pgid, sig) == nil
 }
 
-// applyEnv is the environment of ansible: the agent's own, without its settings, plus the age key for SOPS.
-func applyEnv(env []string, ageKey string) []string {
-	out := make([]string, 0, len(env)+1)
+// applyEnv is the environment of ansible: the agent's own, without its settings, plus the age key for SOPS and the
+// restart request file.
+func applyEnv(env []string, ageKey, restartFile string) []string {
+	out := make([]string, 0, len(env)+2)
 	for _, e := range env {
 		if strings.HasPrefix(e, EnvPrefix) || strings.HasPrefix(e, "SOPS_AGE_KEY_FILE=") {
 			continue
 		}
 		out = append(out, e)
 	}
-	return append(out, "SOPS_AGE_KEY_FILE="+ageKey)
+	return append(out, "SOPS_AGE_KEY_FILE="+ageKey, RestartFileEnv+"="+restartFile)
 }
