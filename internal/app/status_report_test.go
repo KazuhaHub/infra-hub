@@ -81,7 +81,7 @@ func TestStatusShowsRejectedHubs(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &doc); err != nil || len(doc.Hosts[0].Report.RejectedHubs) != 1 {
 		t.Errorf("json: %v\n%s", err, out)
 	}
-	if _, table, _ := run(t, "status", "--config", h.config, "--no-refs"); !strings.Contains(table, "rejected-by https://hub1.example.org:8443") {
+	if _, table, _ := run(t, "status", "--config", h.config, "--no-refs"); !strings.Contains(table, "bad-bundle-from https://hub1.example.org:8443") {
 		t.Errorf("table:\n%s", table)
 	}
 }

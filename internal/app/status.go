@@ -166,7 +166,7 @@ func writeStatusTable(w io.Writer, s report.Status) error {
 		if h.Report != nil {
 			rep = fmt.Sprintf("%s %s %s", h.Report.Result, short12(h.Report.AppliedCommit), h.Report.ReceivedAt)
 			if len(h.Report.RejectedHubs) > 0 {
-				rep += " rejected-by " + strings.Join(h.Report.RejectedHubs, ",")
+				rep += " bad-bundle-from " + strings.Join(h.Report.RejectedHubs, ",")
 			}
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", h.Name, orDash(h.LastSeen), short12(h.Main), rep)
