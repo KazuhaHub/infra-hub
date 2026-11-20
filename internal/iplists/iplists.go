@@ -489,7 +489,7 @@ func (m *IPManager) warnings(l IPList) []string {
 			continue
 		}
 		if st.Held {
-			set[printable(fmt.Sprintf("held:%s update held (%s); the previous list is still served; see infra-hub iplist-accept", p, st.HeldReason))] = true
+			set[printable(fmt.Sprintf("held:%s update held (%s); the previous list is still served; see infra-hub iplist accept", p, st.HeldReason))] = true
 		}
 		if st.Failures >= FailingAfterRuns {
 			set[printable(fmt.Sprintf("failing:%s %d attempts in a row (%s)", p, st.Failures, st.LastError))] = true

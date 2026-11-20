@@ -33,21 +33,12 @@ func (c *cli) newStatus() *cobra.Command {
 			}
 			noRefs, _ := cmd.Flags().GetBool("no-refs")
 			output, _ := cmd.Flags().GetString("output")
-			format, _ := cmd.Flags().GetString("format")
-			legacy := format == "legacy" || (c.legacyConfig && !cmd.Flags().Changed("format") && !cmd.Flags().Changed("output"))
-			if format != "" && format != "legacy" {
-				return usageErrorf("--format %q: only \"legacy\" is known", format)
-			}
 			if output != "table" && output != "json" {
 				return usageErrorf("--output %q: want table or json", output)
 			}
 			in, err := collectStatus(cmd.Context(), cfg, noRefs, c.now())
 			if err != nil {
 				return err
-			}
-			if legacy {
-				// The old document is always JSON and never "not ready": the deployed monitor reads it as before.
-				return writeJSON(c.stdout, report.Legacy(in))
 			}
 			doc := report.NewStatus(in)
 			if output == "json" {
@@ -66,8 +57,6 @@ func (c *cli) newStatus() *cobra.Command {
 	}
 	cmd.Flags().StringP("output", "o", "table", "output format: table or json")
 	cmd.Flags().Bool("no-refs", false, "do not read the git mirror (no git is run)")
-	cmd.Flags().String("format", "", "")
-	_ = cmd.Flags().MarkHidden("format")
 	return cmd
 }
 

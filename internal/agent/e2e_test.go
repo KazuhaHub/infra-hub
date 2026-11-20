@@ -583,3 +583,64 @@ func TestNoncesAreNeverLogged(t *testing.T) {
 }
 
 var _ = io.Discard
+
+// The rotation of docs/hub-key.md: the token lists [old, new]; the hub serves with the old key, is restarted at the
+// same address with the new key, and the agent works throughout. A token with the new pin only refuses the old hub,
+// and one with the old pin only refuses the new hub.
+func TestHubKeyRotation(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	oldKey, err := hubkey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	newK, err := hubkey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPin, _ := hubkey.Pin(oldKey)
+	newPin, _ := hubkey.Pin(newK)
+	if oldPin == newPin {
+		t.Fatal("two keys, one pin")
+	}
+
+	// Step 2 of the runbook: agents know both pins, hubs still use the old key.
+	oldHub := w.StartHubKey(oldKey, "127.0.0.1:0")
+	p1 := w.Publish(agenttest.Options{})
+	a, _ := newAgentURLs(t, w, ModeApply, []string{oldHub.URL}, []string{oldPin, newPin})
+	if o := cycle(t, a); o.Result != ResultOK || o.AppliedCommit != p1.Commit || !o.Reported {
+		t.Fatalf("old key, both pins: %+v", o)
+	}
+
+	// An agent that already dropped the old pin refuses the old hub.
+	onlyNew, _ := newAgentURLs(t, w, ModeVerify, []string{oldHub.URL}, []string{newPin})
+	if o := cycle(t, onlyNew); o.Result != ResultUnreachable || o.Reported {
+		t.Fatalf("new pin only, old hub: %+v", o)
+	}
+
+	// Step 3: the hub is restarted with the new key at the same address.
+	addr := oldHub.Addr
+	oldHub.Stop()
+	newHub := w.StartHubKey(newK, addr)
+	if newHub.URL != oldHub.URL || newHub.Pin != newPin {
+		t.Fatalf("new hub %s %s", newHub.URL, newHub.Pin)
+	}
+	p2 := w.Publish(agenttest.Options{})
+	if o := cycle(t, a); o.Result != ResultOK || o.AppliedCommit != p2.Commit || !o.Reported {
+		t.Fatalf("new key, same agent: %+v", o)
+	}
+	if rep, ok := newHub.Report(t); !ok || rep.Result != "ok" {
+		t.Errorf("the new hub got no report: %+v", rep)
+	}
+
+	// Step 4: the old pin is dropped; the agent still works.
+	p3 := w.Publish(agenttest.Options{})
+	dropped, _ := newAgentURLs(t, w, ModeApply, []string{newHub.URL}, []string{newPin})
+	if o := cycle(t, dropped); o.Result != ResultOK || o.AppliedCommit != p3.Commit {
+		t.Fatalf("new pin only, new hub: %+v", o)
+	}
+	// An agent that never got the new pin (the hubs were switched too early) cannot reach the hub.
+	stale, _ := newAgentURLs(t, w, ModeVerify, []string{newHub.URL}, []string{oldPin})
+	if o := cycle(t, stale); o.Result != ResultUnreachable || o.Reported {
+		t.Fatalf("old pin only, new hub: %+v", o)
+	}
+}

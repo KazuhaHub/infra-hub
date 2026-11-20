@@ -50,13 +50,10 @@ func usageErrorf(format string, a ...any) error {
 	return &exitError{code: ExitUsage, err: fmt.Errorf(format, a...)}
 }
 
-// cli carries what the commands share: the output streams, the clock and what the old spellings switched on.
+// cli carries what the commands share: the output streams and the clock.
 type cli struct {
 	stdout, stderr io.Writer
 	now            func() time.Time
-	// legacyConfig: the command line used the old `-config` spelling, so `status` keeps printing the old JSON unless
-	// a format is asked for. It is what the deployed timer of the private infra repository does today.
-	legacyConfig bool
 }
 
 // Main runs the hub command line (os.Args[1:]) and returns the process exit code.
@@ -66,11 +63,6 @@ func Main(args []string, stdout, stderr io.Writer) int {
 
 func runCLI(c *cli, args []string) int {
 	stdout, stderr := c.stdout, c.stderr
-	args, warnings, legacyConfig := rewriteLegacyFlags(args)
-	c.legacyConfig = legacyConfig
-	for _, w := range warnings {
-		fmt.Fprintf(stderr, "%s: warning: %s\n", program, w)
-	}
 	root := c.newRoot()
 	root.SetArgs(args)
 	root.SetOut(stdout)
@@ -116,7 +108,7 @@ func (c *cli) newRoot() *cobra.Command {
 	root.PersistentFlags().String("config", defaultConfig, "path to the hub's config file")
 	root.PersistentFlags().String("log-format", "text", "log format on stderr: text or json")
 	root.PersistentFlags().String("log-level", "info", "log level: debug, info, warn or error")
-	root.AddCommand(c.newServe(), c.newCheckConfig(), c.newStatus(), c.newIPList(), c.newKey(), c.newToken(), c.newVersion(), c.newLegacyIPListAccept(), c.newLegacyIPListHistory())
+	root.AddCommand(c.newServe(), c.newCheckConfig(), c.newStatus(), c.newIPList(), c.newKey(), c.newToken(), c.newVersion())
 	return root
 }
 

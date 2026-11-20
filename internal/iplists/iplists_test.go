@@ -882,24 +882,10 @@ func TestHistoryRecordsFirstFetchUpdateHeldAndAccept(t *testing.T) {
 	if p, _ := m.Serve("cdn"); p.Version != h[3].Version {
 		t.Fatal("version after accept")
 	}
-	// the last entries are in infra-hub status, and the command prints them as JSON
+	// the last entries are in infra-hub status
 	st := m.Status()
 	if got := st.Lists["cdn"].History; len(got) != 4 || got[3].Event != "accept" {
 		t.Fatalf("%+v", got)
-	}
-	var out bytes.Buffer
-	if err := HistoryReport(m.Dir, m.Lists, "cdn", 2, &out); err != nil {
-		t.Fatal(err)
-	}
-	var doc struct {
-		List    string         `json:"list"`
-		Entries []HistoryEntry `json:"entries"`
-	}
-	if err := json.Unmarshal(out.Bytes(), &doc); err != nil || doc.List != "cdn" || len(doc.Entries) != 2 || doc.Entries[1].Event != "accept" {
-		t.Fatalf("%v %s", err, out.String())
-	}
-	if err := HistoryReport(m.Dir, m.Lists, "../x", 0, &out); err == nil {
-		t.Fatal("a name that is not a configured list was accepted")
 	}
 }
 
