@@ -22,6 +22,11 @@ func runAgent(t *testing.T, env map[string]string, args ...string) (code int, st
 	return code, out.String(), errb.String()
 }
 
+// withLegacy adds the flags that point infra-pull's lock and record into the test's directory.
+func withLegacy(w *agenttest.World, args ...string) []string {
+	return append(args, "--infra-lock", filepath.Join(w.Dir, "infra", "lock"), "--infra-applied", filepath.Join(w.Dir, "infra-applied"))
+}
+
 func writeEnvFile(t *testing.T, w *agenttest.World, mode string, urls, pins []string) string {
 	t.Helper()
 	content := "INFRA_AGENT_TOKEN=" + agenttest.Token(t, pins, urls) + "\nINFRA_AGENT_HOST=" + agenttest.Host +
@@ -40,14 +45,14 @@ func TestRunOnceExitCodesAndStatus(t *testing.T) {
 	p := w.Publish(agenttest.Options{})
 	envFile := writeEnvFile(t, w, "apply", []string{hub.URL}, []string{hub.Pin})
 
-	code, _, errs := runAgent(t, nil, "run", "--once", "--env-file", envFile, "--ansible", w.Stub)
+	code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile, "--ansible", w.Stub)...)
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errs)
 	}
 	if len(w.StubRuns()) != 1 {
 		t.Errorf("stub runs %v", w.StubRuns())
 	}
-	if code, _, errs := runAgent(t, nil, "run", "--once", "--env-file", envFile, "--ansible", w.Stub); code != 0 {
+	if code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile, "--ansible", w.Stub)...); code != 0 {
 		t.Fatalf("unchanged: exit %d: %s", code, errs)
 	}
 
@@ -86,7 +91,7 @@ func TestRunOnceExitCodesAndStatus(t *testing.T) {
 	// A failing apply is exit 1.
 	w.FailStub(true)
 	w.Publish(agenttest.Options{})
-	if code, _, errs := runAgent(t, nil, "run", "--once", "--env-file", envFile, "--ansible", w.Stub); code != 1 || !strings.Contains(errs, "infra-agent: failed:") {
+	if code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile, "--ansible", w.Stub)...); code != 1 || !strings.Contains(errs, "infra-agent: failed:") {
 		t.Errorf("failed apply: exit %d, %q", code, errs)
 	}
 
@@ -94,7 +99,7 @@ func TestRunOnceExitCodesAndStatus(t *testing.T) {
 	other, _ := hubkey.Generate()
 	wrong, _ := hubkey.Pin(other)
 	bad := writeEnvFile(t, w, "verify", []string{hub.URL}, []string{wrong})
-	if code, _, errs := runAgent(t, nil, "run", "--once", "--env-file", bad); code != 1 || !strings.Contains(errs, "unreachable") {
+	if code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", bad)...); code != 3 || !strings.Contains(errs, "unreachable") {
 		t.Errorf("unreachable: exit %d, %q", code, errs)
 	}
 }
@@ -108,12 +113,12 @@ func TestRunOnceRefusesWhileAnotherAgentRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, _, errs := runAgent(t, nil, "run", "--once", "--env-file", envFile)
+	code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile)...)
 	if code != 3 || !strings.Contains(errs, "another infra-agent is running") {
 		t.Fatalf("exit %d, %q", code, errs)
 	}
 	l.Close()
-	if code, _, errs := runAgent(t, nil, "run", "--once", "--env-file", envFile); code != 0 {
+	if code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile)...); code != 0 {
 		t.Fatalf("after the lock is free: exit %d, %q", code, errs)
 	}
 }
@@ -191,8 +196,57 @@ func TestLogSettingsFromTheEnvFile(t *testing.T) {
 	f, _ := os.OpenFile(envFile, os.O_APPEND|os.O_WRONLY, 0)
 	f.WriteString("INFRA_AGENT_LOG_FORMAT=json\n")
 	f.Close()
-	code, _, errs := runAgent(t, nil, "run", "--once", "--env-file", envFile)
+	code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile)...)
 	if code != 0 || !strings.Contains(errs, `"msg":"cycle finished"`) {
 		t.Fatalf("exit %d, log:\n%s", code, errs)
+	}
+}
+
+func TestTestOnlyFlagsCannotComeFromTheEnvironment(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{})
+	envFile := writeEnvFile(t, w, "verify", []string{hub.URL}, []string{hub.Pin})
+	// If INFRA_AGENT_REPO took effect the bundle (statement repo KazuhaHub/infra) would be rejected.
+	env := map[string]string{"INFRA_AGENT_REPO": "Evil/infra", "INFRA_AGENT_ANSIBLE": "/bin/false", "INFRA_AGENT_SSH_KEYGEN": "/bin/false",
+		"INFRA_AGENT_INFRA_LOCK": "/nonexistent/lock", "INFRA_AGENT_INFRA_APPLIED": "/nonexistent/applied"}
+	code, _, errs := runAgent(t, env, withLegacy(w, "run", "--once", "--env-file", envFile)...)
+	if code != 0 || strings.Contains(errs, "flag=--ansible") || strings.Contains(errs, "flag=--repo") || strings.Contains(errs, "flag=--ssh-keygen") {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	// Nor from agent.env: an unknown setting.
+	bad := filepath.Join(w.Dir, "bad.env")
+	os.WriteFile(bad, []byte("INFRA_AGENT_REPO=Evil/infra\n"), 0o600)
+	if code, _, errs := runAgent(t, nil, "status", "--env-file", bad); code != 2 || !strings.Contains(errs, "unknown setting INFRA_AGENT_REPO") {
+		t.Errorf("exit %d %q", code, errs)
+	}
+	// On the command line they work, and the agent says so at startup.
+	_, _, errs = runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile, "--ansible", w.Stub)...)
+	for _, f := range []string{`flag=--ansible`, `flag=--infra-lock`, `flag=--infra-applied`} {
+		if !strings.Contains(errs, f) || !strings.Contains(errs, "test-only flag is set") {
+			t.Errorf("no warning for %s:\n%s", f, errs)
+		}
+	}
+	if strings.Contains(errs, "flag=--repo") {
+		t.Errorf("a warning for a flag at its default:\n%s", errs)
+	}
+}
+
+func TestConfigurationErrorsFromTheFilesExitTwo(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{})
+	envFile := writeEnvFile(t, w, "verify", []string{hub.URL}, []string{hub.Pin})
+	os.WriteFile(filepath.Join(w.Dir, "infra-applied"), []byte("broken"), 0o644)
+	code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile)...)
+	if code != 2 || !strings.Contains(errs, "malformed") {
+		t.Errorf("malformed applied record: exit %d %q", code, errs)
+	}
+	os.Remove(filepath.Join(w.Dir, "infra-applied"))
+	os.MkdirAll(w.StateDir, 0o755)
+	os.Chmod(w.StateDir, 0o755)
+	code, _, errs = runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile)...)
+	if code != 2 || !strings.Contains(errs, "must be 0700") {
+		t.Errorf("state dir: exit %d %q", code, errs)
 	}
 }

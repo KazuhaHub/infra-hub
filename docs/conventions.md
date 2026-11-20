@@ -14,7 +14,7 @@ family. Where Rackbook already decided something, this follows Rackbook.
 - The message is a short lower-case phrase without a trailing period; details go into attributes:
   `slog.Info("bundle applied", "version", v, "took", d)`.
 - Attribute names are the same everywhere (lower camelCase, like the JSON below): `host`, `feature`, `version`,
-  `from`, `to`, `list`, `provider`, `cert`, `path`, `took`, `err`, `commit`, `hub`, `mode`, `result`.
+  `from`, `to`, `list`, `provider`, `cert`, `path`, `took`, `err`, `commit`, `hub`, `mode`, `result`, `statementTime`, `newest`, `message`.
 - Never log a secret, a private key, a token, a nonce, or a file's content that may hold one. Values that could be
   secret are logged as `[redacted]`.
 

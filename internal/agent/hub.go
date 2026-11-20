@@ -29,6 +29,9 @@ const (
 	maxSmall    = 64 << 10
 )
 
+// responseLimit is MaxResponse (a variable so that a test can lower it).
+var responseLimit int64 = MaxResponse
+
 // Hub is one hub, reached only through its pinned key.
 type Hub struct {
 	URL    string
@@ -129,18 +132,90 @@ func (h *Hub) Health(ctx context.Context) (string, error) {
 	return doc.Status, nil
 }
 
-// Bundle fetches the encrypted bundle for host. etag is the commit last verified ("" for none). notModified is true
-// for a 304 (body is nil).
-func (h *Hub) Bundle(ctx context.Context, host, etag string) (body []byte, notModified bool, err error) {
-	hdr := map[string]string{}
-	if etag != "" {
-		hdr["If-None-Match"] = `"` + etag + `"`
-	}
-	status, _, data, err := h.do(ctx, http.MethodGet, "/v1/bundle/"+url.PathEscape(host), hdr, nil, MaxResponse, http.StatusOK, http.StatusNotModified)
+// Bundle fetches the encrypted bundle for host. etag is the commit last verified ("" for none). On a 200 the body is
+// handed to consume as a stream capped at MaxResponse bytes: nothing buffers the whole ciphertext. A failure of the
+// connection while consume reads is a hub error even if consume reports it as a bad bundle. notModified is true for a
+// 304, which is only believable when an If-None-Match was sent and the hub's ETag names the commit that was sent.
+func (h *Hub) Bundle(ctx context.Context, host, etag string, consume func(io.Reader) error) (notModified bool, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.URL+"/v1/bundle/"+url.PathEscape(host), nil)
 	if err != nil {
-		return nil, false, err
+		return false, err
 	}
-	return data, status == http.StatusNotModified, nil
+	if etag != "" {
+		req.Header.Set("If-None-Match", `"`+etag+`"`)
+	}
+	req.Header.Set("User-Agent", "infra-agent")
+	resp, err := h.client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		if etag == "" {
+			return false, errors.New("hub answered 304 to a request without If-None-Match")
+		}
+		if got := strings.TrimPrefix(resp.Header.Get("ETag"), "W/"); got != `"`+etag+`"` {
+			return false, errors.New("hub answered 304 with an ETag that is not the one sent")
+		}
+		return true, nil
+	case http.StatusOK:
+		body := &trackReader{r: &limitReader{r: resp.Body, left: responseLimit}}
+		if err := consume(body); err != nil {
+			if body.err != nil {
+				return false, fmt.Errorf("read the response: %w", body.err)
+			}
+			return false, err
+		}
+		return false, nil
+	}
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, maxSmall))
+	he := &HubError{Status: resp.StatusCode}
+	var doc struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if json.Unmarshal(data, &doc) == nil {
+		he.Code = doc.Error.Code
+	}
+	return false, he
+}
+
+// trackReader remembers a read error other than EOF.
+type trackReader struct {
+	r   io.Reader
+	err error
+}
+
+func (t *trackReader) Read(p []byte) (int, error) {
+	n, err := t.r.Read(p)
+	if err != nil && err != io.EOF {
+		t.err = err
+	}
+	return n, err
+}
+
+// limitReader fails (rather than stopping silently) when more than left bytes would be read.
+type limitReader struct {
+	r    io.Reader
+	left int64
+}
+
+func (l *limitReader) Read(p []byte) (int, error) {
+	if l.left <= 0 {
+		var one [1]byte
+		if n, _ := l.r.Read(one[:]); n > 0 {
+			return 0, fmt.Errorf("the response is larger than %d bytes", responseLimit)
+		}
+		return 0, io.EOF
+	}
+	if int64(len(p)) > l.left {
+		p = p[:l.left]
+	}
+	n, err := l.r.Read(p)
+	l.left -= int64(n)
+	return n, err
 }
 
 // ReportBody is the "report" object of POST /v1/report.

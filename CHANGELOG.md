@@ -8,7 +8,7 @@
   host's age key, verifies it (`ssh-keygen -Y verify`, namespace `infra-bundle`, statement checks, forward-only by
   statement time), extracts it safely into `<state>/releases/<commit>`, applies it with ansible (apply mode) and
   reports. Commands `run [--once]`, `status [-o json]`, `check-config` and `version`; configuration in
-  `/etc/infra-agent/agent.env`; a lock keeps two agents apart. Released with infra-hub from the same tag
+  `/etc/infra/agent.env`; a lock keeps two agents apart. Released with infra-hub from the same tag
   (`infra-agent-linux-amd64`, `infra-agent-linux-arm64`). See docs/agent.md and the example unit docs/infra-agent.service.
 
 ### Changed

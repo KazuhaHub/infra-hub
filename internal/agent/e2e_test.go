@@ -59,6 +59,9 @@ func newAgentURLs(t *testing.T, w *agenttest.World, mode string, urls, pins []st
 		t.Fatal(err)
 	}
 	a.Ansible = w.Stub
+	a.InfraLock = filepath.Join(w.Dir, "infra", "lock")
+	a.InfraApplied = filepath.Join(w.Dir, "infra-applied")
+	a.LockTimeout = 300 * time.Millisecond
 	a.Out = io.Discard
 	c := &clock{t: time.Now()}
 	a.Now = c.now
@@ -476,12 +479,13 @@ func TestReportFallsBackToAnotherHub(t *testing.T) {
 		}
 		// Forward the bundle request to the real hub through a pinned client.
 		h, _ := NewHub(live.URL, []string{live.Pin})
-		body, notMod, err := h.Bundle(r.Context(), agenttest.Host, "")
+		var body bytes.Buffer
+		notMod, err := h.Bundle(r.Context(), agenttest.Host, "", func(r io.Reader) error { _, err := io.Copy(&body, r); return err })
 		if err != nil || notMod {
 			http.Error(rw, "x", 502)
 			return
 		}
-		rw.Write(body)
+		rw.Write(body.Bytes())
 	}))
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
@@ -520,6 +524,7 @@ func TestWrongPinIsUnreachable(t *testing.T) {
 
 func TestOnlyOneAgentAtATime(t *testing.T) {
 	dir := t.TempDir()
+	dir = filepath.Join(dir, "s")
 	l, err := AcquireLock(dir)
 	if err != nil {
 		t.Fatal(err)

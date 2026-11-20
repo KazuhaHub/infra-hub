@@ -26,6 +26,9 @@ const (
 	VerifyTimeout   = 30 * time.Second
 )
 
+// verifyTimeout is VerifyTimeout (a variable so that a test can lower it).
+var verifyTimeout = VerifyTimeout
+
 // RejectError is a bundle that fails a check (signature, hash, format): the cycle result is "rejected".
 type RejectError struct{ Reason string }
 
@@ -38,9 +41,9 @@ const maxPlain = bundle.MaxTarball + bundle.MaxStatement + bundle.MaxSignature +
 
 // OpenBundle decrypts the hub's answer and returns the three files. The archive must hold exactly bundle, bundle.sig
 // and bundle.tar.gz, in that order, each a regular file within its limit, and nothing else.
-func OpenBundle(ciphertext []byte, id *Identity) (bundle.Files, error) {
+func OpenBundle(ciphertext io.Reader, id *Identity) (bundle.Files, error) {
 	var f bundle.Files
-	pr, err := age.Decrypt(bytes.NewReader(ciphertext), id.ids...)
+	pr, err := age.Decrypt(ciphertext, id.ids...)
 	if err != nil {
 		return f, rejectf("cannot decrypt the bundle with this host's age key")
 	}
@@ -131,15 +134,19 @@ func VerifySignature(ctx context.Context, ssh, signers, tmpDir string, statement
 	if err := os.WriteFile(sigPath, sig, 0o600); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(ctx, VerifyTimeout)
+	parent := ctx
+	ctx, cancel := context.WithTimeout(ctx, verifyTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, ssh, "-Y", "verify", "-f", signers, "-I", SignerPrincipal, "-n", SignerNamespace, "-s", sigPath)
 	cmd.Stdin = bytes.NewReader(statement)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Run(); err != nil {
+		if parent.Err() != nil {
+			return parent.Err()
+		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("ssh-keygen did not finish in %s", VerifyTimeout)
+			return fmt.Errorf("ssh-keygen did not finish in %s", verifyTimeout)
 		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {

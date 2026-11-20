@@ -27,9 +27,9 @@ import (
 // Exit codes (docs/conventions.md); there are no others.
 const (
 	ExitOK       = 0
-	ExitFailed   = 1 // the cycle failed, was rejected or reached no hub
+	ExitFailed   = 1 // the cycle failed or was rejected
 	ExitUsage    = 2 // bad flag, argument or configuration
-	ExitNotReady = 3 // not ready, try again: another agent holds the lock
+	ExitNotReady = 3 // not ready, try again: no hub was reachable, or another agent holds the lock
 )
 
 const program = "infra-agent"
@@ -118,7 +118,9 @@ func (c *cli) newRoot() *cobra.Command {
 	pf.String("repo", agent.DefaultRepo, "repository the bundle statement must name (for tests)")
 	pf.String("ansible", "ansible-playbook", "ansible-playbook program (for tests)")
 	pf.String("ssh-keygen", "ssh-keygen", "ssh-keygen program (for tests)")
-	for _, n := range []string{"repo", "ansible", "ssh-keygen"} {
+	pf.String("infra-lock", agent.DefaultInfraLock, "infra-pull's lock file (for tests)")
+	pf.String("infra-applied", agent.DefaultInfraApplied, "infra-pull's applied record (for tests)")
+	for _, n := range hiddenFlags {
 		_ = pf.MarkHidden(n)
 	}
 	root.AddCommand(c.newRun(), c.newStatus(), c.newCheckConfig(), c.newVersion())
@@ -134,11 +136,15 @@ func usageArgs(v cobra.PositionalArgs) cobra.PositionalArgs {
 	}
 }
 
+// hiddenFlags are for tests only: they can be set on the command line but never from the environment or agent.env, so
+// nothing a service manager or a file hands over can redirect the agent to another repository or another program.
+var hiddenFlags = []string{"repo", "ansible", "ssh-keygen", "infra-lock", "infra-applied"}
+
 // applyEnv fills flags that were not given on the command line from INFRA_AGENT_<NAME>.
 func (c *cli) applyEnv(fs *pflag.FlagSet) error {
 	var err error
 	fs.VisitAll(func(f *pflag.Flag) {
-		if f.Changed || err != nil || f.Name == "help" || f.Name == "version" {
+		if f.Changed || err != nil || f.Name == "help" || f.Name == "version" || contains(hiddenFlags, f.Name) {
 			return
 		}
 		name := agent.EnvPrefix + strings.ToUpper(strings.ReplaceAll(f.Name, "-", "_"))
@@ -188,6 +194,15 @@ func (c *cli) loadConfig(cmd *cobra.Command) (agent.Config, error) {
 	return cfg, nil
 }
 
+func contains(l []string, s string) bool {
+	for _, x := range l {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
 func (c *cli) newVersion() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
@@ -202,8 +217,8 @@ func (c *cli) newRun() *cobra.Command {
 		Use:   "run",
 		Short: "Fetch, verify, apply and report: once, or forever",
 		Long: "run repeats the cycle every INFRA_AGENT_INTERVAL (default 5m, each wait with 10 % jitter) until it is stopped.\n" +
-			"With --once it runs one cycle and exits: 0 when the result is ok, verified or unchanged; 1 when it is failed, rejected\n" +
-			"or unreachable; 2 for a configuration error; 3 when another infra-agent holds the lock in the state directory.\n\n" +
+			"With --once it runs one cycle and exits: 0 when the result is ok, verified or unchanged; 1 when it is failed or rejected,\n" +
+			"3 when no hub was reachable or another infra-agent holds the lock in the state directory; 2 for a configuration error.\n\n" +
 			"In verify mode (the default) the bundle is fetched, decrypted, verified and extracted but ansible never runs; in apply\n" +
 			"mode it is applied as well.",
 		Args: usageArgs(cobra.NoArgs),
@@ -230,6 +245,16 @@ func (c *cli) newRun() *cobra.Command {
 			}
 			a.Ansible, _ = cmd.Flags().GetString("ansible")
 			a.SSHKeygen, _ = cmd.Flags().GetString("ssh-keygen")
+			a.InfraLock, _ = cmd.Flags().GetString("infra-lock")
+			a.InfraApplied, _ = cmd.Flags().GetString("infra-applied")
+			for _, n := range hiddenFlags {
+				if f := cmd.Flags().Lookup(n); f != nil && f.Value.String() != f.DefValue {
+					slog.Warn("a test-only flag is set", "flag", "--"+n, "value", f.Value.String())
+				}
+			}
+			if _, err := a.LegacyFloor(); err != nil { // a malformed record is a configuration error, now and not later
+				return err
+			}
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			if once, _ := cmd.Flags().GetBool("once"); once {
@@ -259,6 +284,8 @@ func resultError(o agent.Outcome) error {
 	switch o.Result {
 	case agent.ResultOK, agent.ResultVerified, agent.ResultUnchanged:
 		return nil
+	case agent.ResultUnreachable:
+		return &exitError{code: ExitNotReady, err: fmt.Errorf("%s: %s", o.Result, o.Message)}
 	}
 	return &exitError{code: ExitFailed, err: fmt.Errorf("%s: %s", o.Result, o.Message)}
 }

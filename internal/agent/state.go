@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -104,12 +105,69 @@ var ErrLocked = errors.New("another infra-agent is running")
 // Lock is an exclusive flock on <state dir>/lock, held until Close (or until the process ends).
 type Lock struct{ f *os.File }
 
-// PrepareDir creates the state directory and its releases directory (0700).
+// PrepareDir makes sure the state directory exists: it creates a missing one (0700, with releases/ inside), and refuses
+// one that exists but is not a real directory owned by the user running the agent with mode 0700. It never changes the
+// mode or the owner of an existing directory: that would hide a mistake that exposes the state (or the way to it).
 func PrepareDir(dir string) error {
-	if err := os.MkdirAll(filepath.Join(dir, "releases"), 0o700); err != nil {
+	st, err := os.Lstat(dir)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
+	case err != nil:
 		return err
+	default:
+		if !st.IsDir() {
+			return configErrorf("state directory %s is not a directory", dir)
+		}
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok && int(sys.Uid) != os.Geteuid() {
+			return configErrorf("state directory %s is owned by uid %d, not by uid %d that runs the agent", dir, sys.Uid, os.Geteuid())
+		}
+		if st.Mode().Perm() != 0o700 {
+			return configErrorf("state directory %s has mode %04o, it must be 0700", dir, st.Mode().Perm())
+		}
 	}
-	return os.Chmod(dir, 0o700)
+	return os.MkdirAll(filepath.Join(dir, "releases"), 0o700)
+}
+
+// ErrLockTimeout means the lock was still held when the wait ended.
+var ErrLockTimeout = errors.New("lock timeout")
+
+// lockPoll is how often a lock that is held is tried again (a variable for tests).
+var lockPoll = 250 * time.Millisecond
+
+// LockFile takes an exclusive flock on path, creating the file (and its directory) if needed, and waits up to timeout for
+// another holder to let go. It returns ErrLockTimeout on timeout and ctx.Err() if ctx ends first.
+func LockFile(ctx context.Context, path string, timeout time.Duration) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return f, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			f.Close()
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			f.Close()
+			return nil, ErrLockTimeout
+		}
+		select {
+		case <-ctx.Done():
+			f.Close()
+			return nil, ctx.Err()
+		case <-time.After(lockPoll):
+		}
+	}
 }
 
 // AcquireLock takes the lock without waiting.

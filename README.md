@@ -28,7 +28,7 @@ infra-agent check-config          validate agent.env and the token, ask each hub
 infra-agent version
 ```
 
-Configuration is one env file (`/etc/infra-agent/agent.env`): `INFRA_AGENT_TOKEN` and `INFRA_AGENT_HOST` are required;
+Configuration is one env file (`/etc/infra/agent.env`): `INFRA_AGENT_TOKEN` and `INFRA_AGENT_HOST` are required;
 `INFRA_AGENT_MODE` is `verify` (default: never runs ansible) or `apply`. Everything is in [docs/agent.md](docs/agent.md),
 with an example systemd unit in [docs/infra-agent.service](docs/infra-agent.service).
 

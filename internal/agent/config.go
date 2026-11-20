@@ -20,9 +20,9 @@ const EnvPrefix = "INFRA_AGENT_"
 
 // Defaults of the optional settings.
 const (
-	DefaultEnvFile  = "/etc/infra-agent/agent.env"
+	DefaultEnvFile  = "/etc/infra/agent.env"
 	DefaultAgeKey   = "/etc/infra/age.key"
-	DefaultSigners  = "/etc/infra-agent/allowed_signers"
+	DefaultSigners  = "/etc/infra/allowed_signers"
 	DefaultStateDir = "/var/lib/infra-agent"
 	DefaultInterval = 5 * time.Minute
 	// MinInterval keeps a typo from turning the agent into a load generator.

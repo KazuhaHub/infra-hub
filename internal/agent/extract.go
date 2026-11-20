@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -176,17 +177,21 @@ func ExtractTar(dst string, r io.Reader) error {
 			}
 			f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm|0o400)
 			if err != nil {
-				return err
+				return classify(err, name)
 			}
-			if _, err := io.Copy(f, tr); err != nil {
+			ew := &errWriter{w: f}
+			if _, err := io.Copy(ew, tr); err != nil {
 				f.Close()
+				if ew.err != nil {
+					return ew.err
+				}
 				return rejectf("bundle entry %q: %v", h.Name, err)
 			}
 			if err := f.Close(); err != nil {
 				return err
 			}
 			if err := root.Chmod(name, perm|0o400); err != nil {
-				return err
+				return classify(err, name)
 			}
 			files[name] = true
 		case tar.TypeSymlink:
@@ -197,7 +202,7 @@ func ExtractTar(dst string, r io.Reader) error {
 				return err
 			}
 			if err := root.Symlink(h.Linkname, name); err != nil {
-				return err
+				return classify(err, name)
 			}
 			symlinks[name] = true
 		case tar.TypeLink:
@@ -209,7 +214,7 @@ func ExtractTar(dst string, r io.Reader) error {
 				return err
 			}
 			if err := root.Link(target, name); err != nil {
-				return err
+				return classify(err, name)
 			}
 			files[name] = true
 		default:
@@ -274,14 +279,36 @@ func mkdirAll(root *os.Root, name string) error {
 	if name == "." {
 		return nil
 	}
-	if err := root.MkdirAll(name, 0o755); err != nil {
-		var pe *fs.PathError
-		if errors.As(err, &pe) {
-			return rejectf("cannot create directory %s: %v", name, pe.Err)
-		}
-		return err
+	return classify(root.MkdirAll(name, 0o755), name)
+}
+
+// classify decides whether a failed file operation was caused by the archive's content (a path that exists as another
+// kind of file, a path that tries to leave the tree, a name that is too long: the bundle is rejected) or by the machine
+// (no space, I/O error, permissions: a local fault, which is not the bundle's doing).
+func classify(err error, name string) error {
+	if err == nil {
+		return nil
 	}
-	return nil
+	if errors.Is(err, fs.ErrExist) || errors.Is(err, fs.ErrInvalid) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.EISDIR) ||
+		errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.ENAMETOOLONG) || errors.Is(err, syscall.EXDEV) ||
+		strings.Contains(err.Error(), "path escapes") {
+		return rejectf("bundle entry %q conflicts with another entry or leaves the tree: %v", name, err)
+	}
+	return err
+}
+
+// errWriter remembers a write error, to tell a failing disk from a failing archive.
+type errWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (e *errWriter) Write(p []byte) (int, error) {
+	n, err := e.w.Write(p)
+	if err != nil {
+		e.err = err
+	}
+	return n, err
 }
 
 type limitedReader struct {

@@ -50,6 +50,7 @@ type World struct {
 	otherKey     string
 	infra, attst string // work trees
 	n            int
+	published    map[string][3][]byte // commit -> statement, signature, tarball, for Republish
 }
 
 // Options shape one published bundle.
@@ -184,9 +185,31 @@ func (w *World) Publish(o Options) Published {
 	must(t, os.WriteFile(filepath.Join(w.attst, "bundle"), []byte(stmt), 0o644))
 	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.sig"), sig, 0o644))
 	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.tar.gz"), tarball, 0o644))
+	if w.published == nil {
+		w.published = map[string][3][]byte{}
+	}
+	w.published[commit] = [3][]byte{[]byte(stmt), sig, tarball}
+	w.commitAttestation([]byte(stmt), sig, tarball)
+	return Published{Commit: commit, Time: tm}
+}
+
+func (w *World) commitAttestation(stmt, sig, tarball []byte) {
+	t := w.T
+	must(t, os.WriteFile(filepath.Join(w.attst, "bundle"), stmt, 0o644))
+	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.sig"), sig, 0o644))
+	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.tar.gz"), tarball, 0o644))
 	testutil.RunGit(t, w.attst, "add", "-A")
 	testutil.RunGit(t, w.attst, "commit", "-q", "--allow-empty", "-m", "attest")
-	return Published{Commit: commit, Time: tm}
+}
+
+// Republish serves an earlier bundle again, byte for byte (a replay of what CI once signed).
+func (w *World) Republish(commit string) {
+	w.T.Helper()
+	f, ok := w.published[commit]
+	if !ok {
+		w.T.Fatalf("no bundle for %s", commit)
+	}
+	w.commitAttestation(f[0], f[1], f[2])
 }
 
 // StubRuns is how many times the ansible stub ran, and its log lines.
@@ -218,7 +241,17 @@ type Hub struct {
 }
 
 // StartHub serves the world's mirror for the world's host over TLS 1.3 with a fresh identity key.
-func (w *World) StartHub() *Hub {
+func (w *World) StartHub() *Hub { return w.startHub(w.MirrorRepo) }
+
+// StartHubEmpty is a hub for the same host whose mirror holds no bundle: it answers 503 no_bundle but takes reports.
+func (w *World) StartHubEmpty() *Hub {
+	dir := filepath.Join(w.Dir, fmt.Sprintf("empty-%d", time.Now().UnixNano()))
+	must(w.T, os.MkdirAll(dir, 0o755))
+	testutil.RunGit(w.T, dir, "init", "-q", "-b", "main", ".")
+	return w.startHub(filepath.Join(dir, ".git"))
+}
+
+func (w *World) startHub(mirror string) *Hub {
 	t := w.T
 	t.Helper()
 	key, err := hubkey.Generate()
@@ -236,7 +269,7 @@ func (w *World) StartHub() *Hub {
 	var ticks atomic.Int64
 	base := time.Now()
 	srv.Now = func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * 10 * time.Second) }
-	srv.Bundles = &httpsapi.Bundles{Repo: w.MirrorRepo}
+	srv.Bundles = &httpsapi.Bundles{Repo: mirror}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)
 	h.URL = "https://" + ln.Addr().String()
