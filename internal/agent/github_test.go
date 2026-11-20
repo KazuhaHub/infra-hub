@@ -38,7 +38,7 @@ func TestGitHubFallbackWhenAllHubsAreDown(t *testing.T) {
 			if mode == ModeVerify {
 				wantResult = ResultVerified
 			}
-			if o.Result != wantResult || o.Hub != GitHubSource || !strings.Contains(o.Message, "from GitHub, no hub gave a bundle") {
+			if o.Result != wantResult || o.Hub != GitHubSource || !strings.HasPrefix(o.Message, "from GitHub, no hub gave a bundle (2 of 2 tried): ") || strings.Count(o.Message, "no hub gave a bundle") != 1 {
 				t.Fatalf("outcome %+v", o)
 			}
 			st := mustState(t, w)

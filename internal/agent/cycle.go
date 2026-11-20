@@ -57,9 +57,14 @@ type Agent struct {
 	// InfraLock and InfraApplied are infra-pull's lock and applied record; LockTimeout bounds the wait for the lock.
 	InfraLock, InfraApplied string
 	LockTimeout             time.Duration
+	// MinCycleGap is the shortest time between the start of a cycle and the start of one that a kick causes (default
+	// DefaultMinCycleGap).
+	MinCycleGap time.Duration
 	// Out receives ansible's output (default os.Stderr, which is the journal under systemd).
 	Out io.Writer
 	Now func() time.Time
+
+	noStartDelay bool // tests: no random delay before the first cycle of Loop
 
 	floor int64 // minimum statement time seeded from InfraApplied (0: none); only used while the state has no mark
 }
@@ -321,7 +326,13 @@ func (a *Agent) githubFallback(ctx context.Context, st *State, failed Outcome) O
 		target = st.Verified.Commit
 	}
 	o := a.decide(ctx, st, GitHubSource, target, status == statusNew)
-	o.Message = "from GitHub, no hub gave a bundle (" + failed.Message + "): " + o.Message
+	// failed.Message already says "no hub gave a bundle (n of m tried)" when the hubs were unreachable; a rejection note
+	// does not.
+	why := failed.Message
+	if !strings.HasPrefix(why, "no hub gave a bundle") {
+		why = "no hub gave a bundle (" + why + ")"
+	}
+	o.Message = "from GitHub, " + why + ": " + o.Message
 	return o
 }
 
@@ -531,24 +542,57 @@ func (a *Agent) Loop(ctx context.Context) bool {
 		slog.Warn("cannot remove the restart request", "err", err)
 	}
 	first := min(a.Cfg.Interval, time.Minute)
+	if a.noStartDelay {
+		first = 0
+	}
 	select {
 	case <-ctx.Done():
 		return false
 	case <-time.After(time.Duration(rand.Float64() * float64(first))):
 	}
+	seen := "" // the newest commit a hub told us about by a kick; waiting continues from it, not from the verified one
 	for {
+		cycleStart := time.Now()
 		if _, err := a.Cycle(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("cycle failed", "err", err)
 		}
 		if ctx.Err() == nil && a.takeRestartRequest() {
 			return true
 		}
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return false
-		case <-time.After(Jitter(a.Cfg.Interval)):
+		}
+		// Wait for the interval, or for a hub to say the bundle changed (kick.go). The interval is the upper bound.
+		until := time.Now().Add(Jitter(a.Cfg.Interval))
+		etag := a.kickEtag(seen)
+		kicked, commit := a.waitKick(ctx, etag, until)
+		if kicked {
+			seen = commit
+			slog.Info("a hub has a new bundle, starting a cycle", "host", a.Cfg.Host, "commit", commit)
+			// Never closer than the minimum gap after the last cycle began (and never later than the interval would be).
+			gap := min(a.minGap(), a.Cfg.Interval)
+			pause(ctx, cycleStart.Add(gap), time.Until(cycleStart.Add(gap)))
+		} else {
+			seen = ""
+			pause(ctx, until, time.Until(until))
+		}
+		if ctx.Err() != nil {
+			return false
 		}
 	}
+}
+
+// kickEtag is the commit to wait away from: the verified one, unless a kick already named a newer one (that the last
+// cycle could not verify; asking again from the verified commit would answer at once and loop).
+func (a *Agent) kickEtag(seen string) string {
+	st, err := LoadState(a.Cfg.StateDir)
+	if err != nil {
+		return seen
+	}
+	if st.Verified != nil && (seen == "" || seen == st.Verified.Commit) {
+		return st.Verified.Commit
+	}
+	return seen
 }
 
 // takeRestartRequest reports whether the restart request file exists and removes it. A file that cannot be removed is

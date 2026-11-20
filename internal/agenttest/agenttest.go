@@ -255,11 +255,13 @@ func (w *World) FailStub(fail bool) {
 // Hub is a real hub server on 127.0.0.1.
 type Hub struct {
 	URL, Pin string
-	store    *state.State
-	path     string
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	done     chan struct{}
+	// Bundles is the hub's bundle source; Poke() on it is what the mirror does after a fetch (it wakes /v1/wait).
+	Bundles *httpsapi.Bundles
+	store   *state.State
+	path    string
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	done    chan struct{}
 }
 
 // StartHub serves the world's mirror for the world's host over TLS 1.3 with a fresh identity key.
@@ -291,7 +293,8 @@ func (w *World) startHub(mirror string) *Hub {
 	var ticks atomic.Int64
 	base := time.Now()
 	srv.Now = func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * 10 * time.Second) }
-	srv.Bundles = &httpsapi.Bundles{Repo: mirror}
+	h.Bundles = &httpsapi.Bundles{Repo: mirror}
+	srv.Bundles = h.Bundles
 	srv.Certs = w.Certs
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)

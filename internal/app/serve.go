@@ -72,8 +72,13 @@ func serve(ctx context.Context, cfg config.Config) error {
 		slog.Warn("starting with an empty state", "path", cfg.State, "err", err)
 	}
 
+	bundles := &httpsapi.Bundles{Repo: cfg.Repo}
 	mirror := &gitmirror.Mirror{Repo: cfg.Repo, Upstream: cfg.Upstream, Interval: time.Duration(cfg.MirrorIntervalSeconds) * time.Second,
-		OnSuccess: st.SetMirrorSuccess}
+		OnSuccess: func(t time.Time) {
+			st.SetMirrorSuccess(t)
+			bundles.Poke() // wakes the agents that wait for a new bundle
+		}}
+	bundles.Fresh = func() error { return mirror.Fresh(time.Duration(cfg.MaxStaleSeconds) * time.Second) }
 	go mirror.Run(ctx)
 	go func() { // throttled state writes
 		t := time.NewTicker(15 * time.Second)
@@ -135,7 +140,8 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if ipm != nil {
 		hs.IPLists = ipm
 	}
-	hs.Bundles = &httpsapi.Bundles{Repo: cfg.Repo, Fresh: func() error { return mirror.Fresh(time.Duration(cfg.MaxStaleSeconds) * time.Second) }}
+	hs.Bundles = bundles
+	hs.WaitTimeout = time.Duration(cfg.WaitTimeoutSeconds) * time.Second
 	run := &httpsapi.Runner{Key: key, Addresses: cfg.HTTPSAddresses, Listen: cfg.HTTPS.Listen, Server: hs}
 	httpsDone := make(chan struct{})
 	go func() { defer close(httpsDone); run.Run(ctx) }()
