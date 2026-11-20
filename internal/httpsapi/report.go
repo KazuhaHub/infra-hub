@@ -25,6 +25,11 @@ var (
 	featureNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 )
 
+// validResults are the outcomes of an agent cycle: ok (applied), failed (apply failed), verified (a bundle was fetched
+// and verified, nothing applied: verify mode), rejected (a signature, hash or format check failed), unreachable (no hub
+// answered) and unchanged (nothing new).
+var validResults = map[string]bool{"ok": true, "failed": true, "verified": true, "rejected": true, "unreachable": true, "unchanged": true}
+
 // reportBody is the "report" object of POST /v1/report.
 type reportBody struct {
 	AppliedCommit string                 `json:"appliedCommit"`
@@ -43,11 +48,13 @@ func parseReport(raw json.RawMessage) (state.HostReport, error) {
 	if err := dec.Decode(&b); err != nil {
 		return state.HostReport{}, fmt.Errorf("report: %w", err)
 	}
-	if !commitRe.MatchString(b.AppliedCommit) {
-		return state.HostReport{}, errors.New("report: appliedCommit must be a full lower-case hex commit id")
+	// An empty appliedCommit means the agent has not applied anything yet (a host that only verifies, or a first cycle
+	// that was rejected or could not reach a hub).
+	if b.AppliedCommit != "" && !commitRe.MatchString(b.AppliedCommit) {
+		return state.HostReport{}, errors.New("report: appliedCommit must be a full lower-case hex commit id, or empty")
 	}
-	if b.Result != "ok" && b.Result != "failed" {
-		return state.HostReport{}, errors.New(`report: result must be "ok" or "failed"`)
+	if !validResults[b.Result] {
+		return state.HostReport{}, errors.New(`report: result must be one of "ok", "failed", "verified", "rejected", "unreachable" or "unchanged"`)
 	}
 	if err := checkText("message", b.Message, maxMessage); err != nil {
 		return state.HostReport{}, err

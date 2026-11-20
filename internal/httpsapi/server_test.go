@@ -313,3 +313,30 @@ func TestStrayBracketAfterJSONIsRefused(t *testing.T) {
 		t.Errorf("stray bracket: %d", code)
 	}
 }
+
+// The agent's cycle results are all accepted, with or without an applied commit; any other word is refused.
+func TestReportAcceptsAgentResults(t *testing.T) {
+	h := newHub(t)
+	for _, result := range []string{"ok", "failed", "verified", "rejected", "unreachable", "unchanged"} {
+		for _, applied := range []string{commit, ""} {
+			h.now = h.now.Add(time.Minute) // keep clear of the rate limits
+			nonce := h.challenge(t, "h1")
+			body := reportBodyFor("h1", nonce, `{"appliedCommit":"`+applied+`","result":"`+result+`","message":"m","time":"2026-11-19T08:00:00Z"}`)
+			if code, doc := h.do(t, "POST", "/v1/report", body); code != 200 {
+				t.Errorf("result %s, applied %q: %d %v", result, applied, code, doc)
+			}
+			if got := h.store.st.Reports()["h1"]; got.Result != result || got.AppliedCommit != applied {
+				t.Errorf("stored %+v", got)
+			}
+		}
+	}
+	nonce := h.challenge(t, "h1")
+	for _, result := range []string{"", "OK", "applied", "skipped"} {
+		body := reportBodyFor("h1", nonce, `{"appliedCommit":"`+commit+`","result":"`+result+`","time":"2026-11-19T08:00:00Z"}`)
+		if code, doc := h.do(t, "POST", "/v1/report", body); code != 400 {
+			t.Errorf("result %q: %d %v", result, code, doc)
+		}
+		h.now = h.now.Add(time.Minute)
+		nonce = h.challenge(t, "h1")
+	}
+}
