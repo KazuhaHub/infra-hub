@@ -550,11 +550,19 @@ func (a *Agent) Loop(ctx context.Context) bool {
 		return false
 	case <-time.After(time.Duration(rand.Float64() * float64(first))):
 	}
-	seen := "" // the newest commit a hub told us about by a kick; waiting continues from it, not from the verified one
+	failed := "" // the commit whose apply failed in the last cycle ("" if it did not)
+	seen := ""   // the newest commit a hub told us about by a kick; waiting continues from it, not from the verified one
 	for {
-		cycleStart := time.Now()
-		if _, err := a.Cycle(ctx); err != nil && ctx.Err() == nil {
+		o, err := a.Cycle(ctx)
+		if err != nil && ctx.Err() == nil {
 			slog.Error("cycle failed", "err", err)
+		}
+		cycleEnd := time.Now()
+		failed = ""
+		if o.Result == ResultFailed {
+			if st, err := LoadState(a.Cfg.StateDir); err == nil && st.Verified != nil {
+				failed = st.Verified.Commit
+			}
 		}
 		if ctx.Err() == nil && a.takeRestartRequest() {
 			return true
@@ -566,12 +574,18 @@ func (a *Agent) Loop(ctx context.Context) bool {
 		until := time.Now().Add(Jitter(a.Cfg.Interval))
 		etag := a.kickEtag(seen)
 		kicked, commit := a.waitKick(ctx, etag, until)
-		if kicked {
+		if kicked && commit == failed {
+			// The kick names the commit whose apply just failed: another cycle now would only run ansible again, back to
+			// back. The normal interval decides when the retry happens.
+			slog.Info("a hub names the commit whose apply failed, retrying at the next interval", "host", a.Cfg.Host, "commit", commit)
+			seen = commit
+			pause(ctx, until, time.Until(until))
+		} else if kicked {
 			seen = commit
 			slog.Info("a hub has a new bundle, starting a cycle", "host", a.Cfg.Host, "commit", commit)
-			// Never closer than the minimum gap after the last cycle began (and never later than the interval would be).
-			gap := min(a.minGap(), a.Cfg.Interval)
-			pause(ctx, cycleStart.Add(gap), time.Until(cycleStart.Add(gap)))
+			// Never closer than the minimum gap after the last cycle ended (and never later than the interval would be).
+			gapEnd := cycleEnd.Add(min(a.minGap(), a.Cfg.Interval))
+			pause(ctx, gapEnd, time.Until(gapEnd))
 		} else {
 			seen = ""
 			pause(ctx, until, time.Until(until))

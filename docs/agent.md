@@ -184,7 +184,7 @@ commit (empty when there is none). The hub:
   default, 10 to 300), `200 {"apiVersion":"v1","changed":false}`.
 
 The answer holds no secret: the commit is what the `ETag` of `/v1/bundle/<host>` shows anyway. On `changed` the agent
-starts a cycle at once (at least 10 s after the previous cycle began), which fetches, verifies and applies as always: a
+starts a cycle at once (at least 10 s after the previous cycle ended; when the kick names the commit whose apply just failed, the retry waits for the normal interval instead), which fetches, verifies and applies as always: a
 kick decides only *when*, never *what*. So a wrong or hostile answer can cause at most an early poll.
 
 - **The interval stays the upper bound.** The wait never extends the time between cycles: when the interval (plus or

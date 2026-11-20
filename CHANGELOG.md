@@ -10,7 +10,7 @@
   fetch. At most 2 held requests per host and 256 in all, 12 requests a minute per peer; a held request ends when the
   client leaves or the hub stops (the server's own read and write timeouts are moved for it).
 - `infra-agent run` waits between cycles on that endpoint of the first hub that has it and starts a cycle as soon as the
-  bundle changes (at least 10 s after the previous cycle began). The interval stays the upper bound; a hub that answers
+  bundle changes (at least 10 s after the previous cycle ended; a kick for the commit whose apply just failed waits for the interval). The interval stays the upper bound; a hub that answers
   404 is not asked for an hour; errors back off with jitter; after a kick for a bundle that could not be verified the
   next wait starts from that commit, so there is no loop. Nothing changes against an older hub.
 - `GET /install`: a POSIX sh install script (built into the binary, no secret): `curl -fsSk --pinnedpubkey <pin>
