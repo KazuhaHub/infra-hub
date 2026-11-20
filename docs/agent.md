@@ -45,9 +45,9 @@ infra-agent check-config          validate agent.env, the token and the key file
 infra-agent version
 ```
 
-`run --once` exits 0 for `ok`, `verified` and `unchanged`; 1 for `failed` and `rejected`; 3 for `unreachable` and when
-another infra-agent holds the lock (below); 2 for a configuration error (including a state directory with the wrong mode
-or owner, and a malformed `/var/lib/infra/applied`). `status -o json` has `"apiVersion": "v1"`, camelCase
+`run --once` exits 0 for `ok`, `verified` and `unchanged`; 1 for `failed` and `rejected`; 3 for `unreachable`, when
+another infra-agent holds the lock (below), and when the run was interrupted by a signal (SIGINT, SIGTERM); 2 for a
+configuration error (including a state directory or `releases/` with the wrong mode or owner). `status -o json` has `"apiVersion": "v1"`, camelCase
 keys and RFC 3339 UTC times.
 
 ## One cycle
@@ -61,9 +61,10 @@ that a fleet that starts together does not call the hubs together.
    whole in memory. A `304` means there is nothing new, but only when an `If-None-Match` was sent and the hub's `ETag` is
    the commit sent; any other `304` is a hub error. A `503` (`stale_mirror`, `no_bundle`), another error status, a
    network error, a connection that breaks in the middle of a body, or a TLS error is logged and the next hub is tried.
-   A bundle that fails verification (below) is also logged and the next hub is tried, and so is a bundle that is not
-   newer than the verified one (the other hubs may be ahead); only when every hub has answered, the agent falls back to
-   what it has verified. If no hub gives a usable bundle the result is `rejected` (some hub served one that failed a
+   A bundle that fails verification (below) is also logged and the next hub is tried. So is every answer that says
+   nothing new (a `304`, the same bundle, an older one): the other hubs may be ahead of a mirror that lags, so the agent
+   asks them all, stops at the first newer bundle, and falls back to what it has verified (the answer of the first hub that
+   had nothing new) only when every hub has answered. If no hub gives a usable bundle the result is `rejected` (some hub served one that failed a
    check) or `unreachable`.
 2. **Decrypt and check the archive.** age decryption with the host's key. The plain archive must hold exactly `bundle`,
    `bundle.sig` and `bundle.tar.gz`, in that order, each a regular file within its size limit (4 KiB, 4 KiB, 64 MiB), and
@@ -80,21 +81,26 @@ that a fleet that starts together does not call the hubs together.
    releases are kept.
 7. **Apply** (apply mode only): the agent first takes `flock` on `/var/lib/infra/lock`, the lock infra-pull and the
    bootstrap hold while they apply, and waits up to 30 minutes for it, so that two runs of ansible on one host can never
-   overlap. If it is still held after that the result is `failed` with the message `another run holds
+   overlap. It then writes `/var/lib/infra/lock.since` as infra-pull does (the epoch in seconds and a newline, through
+   `lock.since.new` and a rename) and removes it when it lets go; infra-pull reads that file's age to tell a stuck holder
+   from a working one, and calls a lock held for more than its `LOCK_MAX` (1800 s, the `TimeoutStartSec` of its unit)
+   stuck. For that reason one ansible run is limited to 25 minutes here, inside `LOCK_MAX`; keep it so if either
+   side changes. If it is still held after that the result is `failed` with the message `another run holds
    /var/lib/infra/lock`. Then, in `<release>/infra`, `ansible-playbook -i inventory/hosts.yml --limit <host> site.yml`
    with `SOPS_AGE_KEY_FILE=<age key>`, in its own process group. The output goes to stderr, which is the journal. A
    non-zero exit is `failed`, and the applied state does not change, so the next cycle tries again (also when the hub
    answers `304`: the extracted release is applied again). On success the applied commit, the statement time of that
    bundle and the time of the apply are written atomically. Like infra-pull, the same commit is applied again when the
-   last success is more than 24 h old, which repairs drift. One run is stopped after an hour, and when the agent is
-   stopped: SIGTERM to the process group, SIGKILL to the whole group after 30 s.
+   last success is more than 24 h old, which repairs drift. One run is stopped after 25 minutes, and when the agent is
+   stopped: SIGTERM to the process group, SIGKILL to the whole group after 30 s (skipped when the group is already gone).
 8. **Report.** `POST /v1/challenge`, decrypt the nonce with the age key, `POST /v1/report` with `appliedCommit`,
    `result`, a short `message` (at most 500 bytes, never ansible output) and `time`. It goes to the hub that served the
    bundle, then to the others until one accepts it. When the serving hub is not the first one in the token, when no hub
    served, or when some hub served a rejected bundle, it goes to every hub, so that the first and the rejecting hub also
    learn what happened. A hub that served a rejected bundle is named in the message: `hub X served a rejected bundle:
    <reason>`, even when another hub then gave a good one. A report that cannot be delivered is logged and does not
-   change the result. Nonces are never logged.
+   change the result. The report also lists those hubs in `rejectedHubs` (at most 8 hub URLs; `infra-hub status` shows
+   them under the host's report). Nonces are never logged.
 
 If the agent is stopped in the middle of a cycle it logs `interrupted` and leaves `lastResult` and the other last-cycle
 fields of the state as they were.
@@ -124,14 +130,28 @@ bundle was still genuinely signed, so a hub that then serves an older one must n
 wrong clock in CI, with a time in the past, would be ignored until a bundle with a later time is signed; CI's clock is
 part of what is trusted.
 
-**First floor.** A fresh agent has no mark, and would accept any validly signed old bundle, however old. So when the
-state has neither a verified nor an applied bundle, the agent reads infra-pull's record `/var/lib/infra/applied`, one line
-`<commit> <unix applied_at>`, and takes `applied_at` as the minimum statement time. That works because infra-pull applied
-an attested commit of `main` at `applied_at`, so any bundle signed at or after that moment is that `main` or a newer one,
-and anything signed before it is older than what the host already runs. A missing file means no floor. A file that is not
-in that form is a configuration error (exit 2). Once the state has a mark the file is not read. Consequence: the
-bundle of the `main` that infra-pull applied was signed before `applied_at`, so on a host that is already current the agent
-reports `unchanged` until the next `main` is signed; its first `verified` is that next bundle.
+**First floor.** A fresh agent has no mark, and would accept any validly signed old bundle, however old. So in a cycle (and
+only there, never at startup) where the state has neither a verified nor an applied bundle, the agent reads infra-pull's
+record `/var/lib/infra/applied`, one line `<commit> <unix applied_at>`, and takes `applied_at` as the minimum statement
+time. That works because infra-pull applied an attested commit of `main` at `applied_at`, so any bundle signed at or
+after that moment is that `main` or a newer one, and anything signed before it is older than what the host already runs.
+Cases:
+
+- no file: no floor; the cycle goes on.
+- `applied_at` is 0: infra-pull writes `<commit> 0` when it seeds its floor and has not applied anything yet. The floor
+  is unknown, so the cycle verifies nothing: result `unchanged`, message `waiting for infra-pull to record an applied
+  time`. It is not an error, and the agent tries again next cycle.
+- a file that is not in that form: result `failed` with a message that names the file. It is not an exit, so a daemon
+  does not crash-loop on it; it repairs itself when the file does.
+
+Once the state has a mark the file is not read. Consequence: the bundle of the `main` that infra-pull applied was signed
+before `applied_at`, so on a host that is already current the agent reports `unchanged` until the next `main` is
+signed; its first `verified` is that next bundle.
+
+**What the time rule relies on.** Forward-only by statement time is only as good as the signing side's ordering: infra's
+`attest-main.yml` must serialize its signing jobs (`concurrency` with `cancel-in-progress: false`), so that two runs
+cannot sign out of order, and must keep its "main moved on" check, so that it never signs a commit that is no longer the
+tip of `main`. Without those a newer `main` could be signed with an older time, and the agent would ignore it.
 
 ### Extraction
 
@@ -149,8 +169,9 @@ the agent. Go's `os.Root` is a second guard: no file operation can leave the dir
 
 `verify` (the default) does everything up to and including extraction and reports `verified`, but never runs ansible. It is
 for the first phase of a rollout: the agent proves on the real host that it reaches the hubs, decrypts, verifies and
-extracts what CI signed, with no effect on the host. `apply` also runs ansible. Switching the mode needs a restart of the
-service; the first cycle in apply mode applies the bundle that was already verified.
+extracts what CI signed, with no effect on the host. `apply` also runs ansible. Before any host is switched to `apply`, the infra repository must stop and disable
+`infra-pull.timer` on that host (that gate is landed separately in infra); the lock only keeps two runs that overlap
+apart, it does not make two owners of one host safe. Switching the mode needs a restart of the service; the first cycle in apply mode applies the bundle that was already verified.
 
 ## State
 
@@ -166,7 +187,8 @@ service; the first cycle in apply mode applies the bundle that was already verif
 silently, because it carries the forward-only line; after looking at it, remove it, and the agent starts from nothing.
 A second `infra-agent run` exits with code 3 and the message `another infra-agent is running`. The agent creates a
 missing state directory (0700) and never changes an existing one: if it exists and is not a real directory, is not owned
-by the user running the agent, or does not have mode 0700, it refuses to run (exit 2) and says what is wrong.
+by the user running the agent, or does not have mode 0700, it refuses to run (exit 2) and says what is wrong. `releases/` gets the same check. A missing
+`/var/lib/infra` (for infra-pull's lock) is created with mode 0700.
 
 ## Running it beside infra-pull
 

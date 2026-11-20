@@ -13,8 +13,9 @@ import (
 	"time"
 )
 
-// ApplyTimeout bounds one ansible run.
-const ApplyTimeout = time.Hour
+// ApplyTimeout bounds one ansible run. It stays inside infra-pull's LOCK_MAX (1800 s, its unit's TimeoutStartSec): the
+// agent holds infra-pull's lock for the length of a run, and infra-pull calls a lock held longer than LOCK_MAX stuck.
+const ApplyTimeout = 25 * time.Minute
 
 // killGrace is how long ansible gets to stop after SIGTERM before its whole process group is killed (a variable for
 // tests).
@@ -52,12 +53,12 @@ func Apply(ctx context.Context, ansible, release, host, ageKey string, out io.Wr
 	case err = <-done:
 	case <-ctx.Done():
 		stopped = true
-		_ = syscall.Kill(-pgid, syscall.SIGTERM)
+		killGroup(pgid, syscall.SIGTERM)
 		select {
 		case err = <-done:
 		case <-time.After(killGrace):
 		}
-		_ = syscall.Kill(-pgid, syscall.SIGKILL) // whatever is left of the group, ansible's children included
+		killGroup(pgid, syscall.SIGKILL) // whatever is left of the group, ansible's children included
 		if err == nil {
 			select {
 			case err = <-done:
@@ -76,6 +77,15 @@ func Apply(ctx context.Context, ansible, release, host, ageKey string, out io.Wr
 		return &ApplyError{Message: "ansible-playbook: " + err.Error()}
 	}
 	return nil
+}
+
+// killGroup sends sig to the process group, unless the group no longer exists (then the id may belong to something
+// new, and there is nothing to signal). It reports whether it sent the signal.
+func killGroup(pgid int, sig syscall.Signal) bool {
+	if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+		return false
+	}
+	return syscall.Kill(-pgid, sig) == nil
 }
 
 // applyEnv is the environment of ansible: the agent's own, without its settings, plus the age key for SOPS.

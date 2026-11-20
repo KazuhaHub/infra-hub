@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -129,27 +131,48 @@ func TestInitialFloorFromInfraPull(t *testing.T) {
 	}
 }
 
-func TestInfraPullRecordMalformedIsAConfigError(t *testing.T) {
+func TestInfraPullRecordMalformedIsAFailedCycleAndZeroMeansWait(t *testing.T) {
 	for name, content := range map[string]string{"one field": "abc\n", "short commit": "abc 1790000000\n", "no time": strings.Repeat("a", 40) + " soon\n",
-		"zero": strings.Repeat("a", 40) + " 0\n", "three fields": strings.Repeat("a", 40) + " 1 2\n", "empty": ""} {
+		"negative": strings.Repeat("a", 40) + " -5\n", "three fields": strings.Repeat("a", 40) + " 1 2\n", "empty": ""} {
 		t.Run(name, func(t *testing.T) {
 			w := agenttest.NewWorld(t)
 			hub := w.StartHub()
 			w.Publish(agenttest.Options{})
 			a, _ := newAgent(t, w, ModeVerify, hub)
 			os.WriteFile(a.InfraApplied, []byte(content), 0o644)
-			_, err := a.Cycle(context.Background())
-			if !isConfigError(err) || !strings.Contains(err.Error(), a.InfraApplied) {
-				t.Fatalf("err %v", err)
+			o := cycle(t, a) // no error: the daemon must not crash-loop
+			if o.Result != ResultFailed || !strings.Contains(o.Message, a.InfraApplied) || !strings.Contains(o.Message, "malformed") {
+				t.Fatalf("outcome %+v", o)
 			}
-			if _, e := a.LegacyFloor(); !isConfigError(e) {
-				t.Errorf("LegacyFloor: %v", e)
+			if len(releases(t, w)) != 0 || mustState(t, w).Verified != nil {
+				t.Errorf("something was verified")
+			}
+			if rep, ok := hub.Report(t); !ok || rep.Result != "failed" {
+				t.Errorf("hub report %+v", rep)
 			}
 		})
 	}
+	// infra-pull writes "<commit> 0" when it seeds its floor: valid, the floor is unknown, nothing is verified, and it
+	// is not an error. Once infra-pull records a time the agent goes on.
 	w := agenttest.NewWorld(t)
-	a, _ := newAgent(t, w, ModeVerify, w.StartHub())
-	if n, err := a.LegacyFloor(); n != 0 || err != nil { // a missing file is no floor
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{Time: 1790000100})
+	a, _ := newAgent(t, w, ModeVerify, hub)
+	os.WriteFile(a.InfraApplied, []byte(strings.Repeat("a", 40)+" 0\n"), 0o644)
+	o := cycle(t, a)
+	if o.Result != ResultUnchanged || o.Message != "waiting for infra-pull to record an applied time" || len(releases(t, w)) != 0 {
+		t.Fatalf("outcome %+v", o)
+	}
+	os.WriteFile(a.InfraApplied, []byte(strings.Repeat("a", 40)+" 1790000000\n"), 0o644)
+	if o := cycle(t, a); o.Result != ResultVerified {
+		t.Fatalf("after infra-pull recorded a time: %+v", o)
+	}
+	if n, err := a.LegacyFloor(); n != 1790000000 || err != nil {
+		t.Errorf("%d %v", n, err)
+	}
+	w2 := agenttest.NewWorld(t)
+	a2, _ := newAgent(t, w2, ModeVerify, w2.StartHub())
+	if n, err := a2.LegacyFloor(); n != 0 || err != nil { // a missing file is no floor
 		t.Errorf("missing file: %d %v", n, err)
 	}
 }
@@ -264,6 +287,8 @@ func TestRejectedBundleIsReportedEvenWhenAnotherHubSucceeds(t *testing.T) {
 	}
 	if rep, ok := live.Report(t); !ok || !strings.Contains(rep.Message, want) || rep.Result != "verified" {
 		t.Errorf("hub report %+v", rep)
+	} else if len(rep.RejectedHubs) != 1 || rep.RejectedHubs[0] != bad {
+		t.Errorf("rejectedHubs %v, want [%s]", rep.RejectedHubs, bad)
 	}
 }
 
@@ -551,4 +576,135 @@ func TestJitterBounds(t *testing.T) {
 	if lo > d-d/12 || hi < d+d/12 {
 		t.Errorf("no spread: %s .. %s", lo, hi)
 	}
+}
+
+func TestAHubWithNothingNewDoesNotEndTheSearch(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	live := w.StartHub()
+	w.Publish(agenttest.Options{})
+	same, samePin := fakeHub(t, bundleBody(t, w)) // stays on the first bundle
+	notMod, notModPin := fakeHubFunc(t, func(rw http.ResponseWriter, r *http.Request) {
+		if inm := r.Header.Get("If-None-Match"); inm != "" {
+			rw.Header().Set("ETag", inm)
+			rw.WriteHeader(http.StatusNotModified)
+			return
+		}
+		http.Error(rw, "no", 503)
+	})
+	first, _ := newAgentURLs(t, w, ModeVerify, []string{live.URL}, []string{live.Pin})
+	if o := cycle(t, first); o.Result != ResultVerified {
+		t.Fatalf("%+v", o)
+	}
+	p2 := w.Publish(agenttest.Options{})
+	for name, lagging := range map[string]struct{ url, pin string }{"same bundle": {same, samePin}, "304": {notMod, notModPin}} {
+		a, _ := newAgentURLs(t, w, ModeVerify, []string{lagging.url, live.URL}, []string{lagging.pin, live.Pin})
+		os.RemoveAll(w.StateDir)
+		// A state that has verified the first bundle.
+		if o := cycle(t, mustAgentOn(t, w, same, samePin)); o.Result != ResultVerified {
+			t.Fatalf("%s setup: %+v", name, o)
+		}
+		o := cycle(t, a)
+		if o.Result != ResultVerified || o.Hub != live.URL || mustState(t, w).Verified.Commit != p2.Commit {
+			t.Fatalf("%s: %+v", name, o)
+		}
+	}
+	// With every hub lagging the answer is "unchanged" from the first of them.
+	a, _ := newAgentURLs(t, w, ModeVerify, []string{notMod, same}, []string{notModPin, samePin})
+	if o := cycle(t, a); o.Result != ResultUnchanged || o.Hub != notMod {
+		t.Fatalf("%+v", o)
+	}
+}
+
+func mustAgentOn(t *testing.T, w *agenttest.World, url, pin string) *Agent {
+	a, _ := newAgentURLs(t, w, ModeVerify, []string{url}, []string{pin})
+	return a
+}
+
+func TestApplyWritesLockSinceLikeInfraPull(t *testing.T) {
+	if ApplyTimeout > 1800*time.Second {
+		t.Errorf("ApplyTimeout %s is beyond infra-pull's LOCK_MAX", ApplyTimeout)
+	}
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{})
+	a, clk := newAgent(t, w, ModeApply, hub)
+	since := filepath.Join(filepath.Dir(a.InfraLock), "lock.since")
+	seen := filepath.Join(w.Dir, "seen")
+	stub := filepath.Join(w.Dir, "peek")
+	os.WriteFile(stub, []byte("#!/bin/sh\ncat "+since+" > "+seen+"\nls "+since+".new > "+seen+".new 2>/dev/null\nexit 0\n"), 0o755)
+	a.Ansible = stub
+	if o := cycle(t, a); o.Result != ResultOK {
+		t.Fatalf("%+v", o)
+	}
+	got, _ := os.ReadFile(seen)
+	if string(got) != fmt.Sprintf("%d\n", clk.t.Unix()) {
+		t.Errorf("lock.since during the run: %q, want %d and a newline", got, clk.t.Unix())
+	}
+	if _, err := os.Stat(seen + ".new"); err == nil {
+		if b, _ := os.ReadFile(seen + ".new"); len(b) != 0 {
+			t.Errorf("lock.since.new existed during the run")
+		}
+	}
+	for _, p := range []string{since, since + ".new"} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("%s is left behind", p)
+		}
+	}
+}
+
+func TestKillGroupSkipsAGroupThatIsGone(t *testing.T) {
+	cmd := newTrue(t)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if killGroup(cmd.Process.Pid, syscall.SIGKILL) {
+		t.Error("signalled a group that does not exist")
+	}
+}
+
+func TestLockDirIsPrivate(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "infra", "lock")
+	f, err := LockFile(context.Background(), p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	if st, _ := os.Stat(filepath.Dir(p)); st.Mode().Perm() != 0o700 {
+		t.Errorf("mode %v", st.Mode())
+	}
+}
+
+func TestReleasesDirIsCheckedLikeTheStateDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := PrepareDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	rel := filepath.Join(dir, "releases")
+	os.Chmod(rel, 0o755)
+	err := PrepareDir(dir)
+	if !isConfigError(err) || !strings.Contains(err.Error(), rel) {
+		t.Fatalf("err %v", err)
+	}
+	if st, _ := os.Stat(rel); st.Mode().Perm() != 0o755 {
+		t.Errorf("releases was chmodded to %v", st.Mode())
+	}
+}
+
+func TestAnInterruptedCycleIsErrInterrupted(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{})
+	a, _ := newAgent(t, w, ModeVerify, hub)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := a.Cycle(ctx); !errors.Is(err, ErrInterrupted) {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func newTrue(t *testing.T) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command("true")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	return cmd
 }

@@ -39,8 +39,14 @@ func newAgent(t *testing.T, w *agenttest.World, mode string, hubs ...*agenttest.
 
 func newAgentURLs(t *testing.T, w *agenttest.World, mode string, urls, pins []string) (*Agent, *clock) {
 	t.Helper()
+	var uniq []string // test servers made from one template share a key, and a token lists a pin once
+	for _, p := range pins {
+		if !contains(uniq, p) {
+			uniq = append(uniq, p)
+		}
+	}
 	cfg, err := FromValues(map[string]string{
-		"INFRA_AGENT_TOKEN":     agenttest.Token(t, pins, urls),
+		"INFRA_AGENT_TOKEN":     agenttest.Token(t, uniq, urls),
 		"INFRA_AGENT_HOST":      agenttest.Host,
 		"INFRA_AGENT_AGE_KEY":   w.AgeKeyPath,
 		"INFRA_AGENT_SIGNERS":   w.SignersPath,

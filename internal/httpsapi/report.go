@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/KazuhaHub/infra-hub/internal/jointoken"
 	"github.com/KazuhaHub/infra-hub/internal/state"
 )
 
@@ -18,6 +19,7 @@ const (
 	maxMessage     = 4096
 	maxFeatures    = 100
 	maxFeatureNote = 1024
+	maxRejected    = 8
 )
 
 var (
@@ -37,6 +39,7 @@ type reportBody struct {
 	Message       string                 `json:"message"`
 	Time          string                 `json:"time"`
 	Features      []state.FeatureSummary `json:"features"`
+	RejectedHubs  []string               `json:"rejectedHubs"`
 }
 
 // parseReport decodes and validates a report; unknown fields are an error so that a typo is not silently dropped.
@@ -82,8 +85,16 @@ func parseReport(raw json.RawMessage) (state.HostReport, error) {
 			return state.HostReport{}, err
 		}
 	}
+	if len(b.RejectedHubs) > maxRejected {
+		return state.HostReport{}, fmt.Errorf("report: more than %d rejectedHubs", maxRejected)
+	}
+	for _, u := range b.RejectedHubs {
+		if err := jointoken.ValidateHubURL(u); err != nil {
+			return state.HostReport{}, fmt.Errorf("report: rejectedHubs: %v", err)
+		}
+	}
 	return state.HostReport{AppliedCommit: b.AppliedCommit, Result: b.Result, Message: b.Message,
-		Time: t.UTC().Format(time.RFC3339), Features: b.Features}, nil
+		Time: t.UTC().Format(time.RFC3339), Features: b.Features, RejectedHubs: b.RejectedHubs}, nil
 }
 
 func checkText(what, s string, max int) error {

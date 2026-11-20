@@ -218,7 +218,7 @@ func (c *cli) newRun() *cobra.Command {
 		Short: "Fetch, verify, apply and report: once, or forever",
 		Long: "run repeats the cycle every INFRA_AGENT_INTERVAL (default 5m, each wait with 10 % jitter) until it is stopped.\n" +
 			"With --once it runs one cycle and exits: 0 when the result is ok, verified or unchanged; 1 when it is failed or rejected,\n" +
-			"3 when no hub was reachable or another infra-agent holds the lock in the state directory; 2 for a configuration error.\n\n" +
+			"3 when no hub was reachable, another infra-agent holds the lock in the state directory, or the run was interrupted by a signal; 2 for a configuration error.\n\n" +
 			"In verify mode (the default) the bundle is fetched, decrypted, verified and extracted but ansible never runs; in apply\n" +
 			"mode it is applied as well.",
 		Args: usageArgs(cobra.NoArgs),
@@ -252,13 +252,13 @@ func (c *cli) newRun() *cobra.Command {
 					slog.Warn("a test-only flag is set", "flag", "--"+n, "value", f.Value.String())
 				}
 			}
-			if _, err := a.LegacyFloor(); err != nil { // a malformed record is a configuration error, now and not later
-				return err
-			}
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
 			if once, _ := cmd.Flags().GetBool("once"); once {
 				o, err := a.Cycle(ctx)
+				if errors.Is(err, agent.ErrInterrupted) {
+					return &exitError{code: ExitNotReady, err: err}
+				}
 				if err != nil {
 					return err
 				}

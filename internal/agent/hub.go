@@ -224,6 +224,8 @@ type ReportBody struct {
 	Result        string `json:"result"`
 	Message       string `json:"message"`
 	Time          string `json:"time"`
+	// RejectedHubs are the hubs that served a bundle that was rejected in this cycle.
+	RejectedHubs []string `json:"rejectedHubs,omitempty"`
 }
 
 // Report asks for a challenge, answers it with the nonce decrypted by the host's age key and posts the report.

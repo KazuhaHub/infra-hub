@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -86,8 +87,16 @@ type Outcome struct {
 	Reported      bool
 }
 
-// LegacyFloor reads infra-pull's applied record: "<commit> <unix applied_at>". A missing file is no floor (0). A file
-// that does not have that form is a ConfigError.
+// ErrFloorUnknown means infra-pull's record has applied_at 0: infra-pull seeded its floor but has not applied anything
+// yet, so there is no time to start from.
+var ErrFloorUnknown = errors.New("waiting for infra-pull to record an applied time")
+
+// ErrInterrupted is the error of a cycle that was stopped from outside.
+var ErrInterrupted = errors.New("interrupted")
+
+// LegacyFloor reads infra-pull's applied record: "<commit> <unix applied_at>". A missing file is no floor (0). An
+// applied_at of 0 (what infra-pull writes when it seeds its floor) is ErrFloorUnknown. A file that does not have the
+// form is an error that the cycle reports as result failed.
 func (a *Agent) LegacyFloor() (int64, error) {
 	data, err := os.ReadFile(a.InfraApplied)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -98,11 +107,14 @@ func (a *Agent) LegacyFloor() (int64, error) {
 	}
 	f := strings.Fields(string(data))
 	if len(f) != 2 || !commitHex.MatchString(f[0]) {
-		return 0, configErrorf("%s is malformed: want \"<commit> <unix applied_at>\"", a.InfraApplied)
+		return 0, fmt.Errorf("%s is malformed: want \"<commit> <unix applied_at>\"", a.InfraApplied)
 	}
 	n, err := strconv.ParseInt(f[1], 10, 64)
-	if err != nil || n < 1 {
-		return 0, configErrorf("%s is malformed: applied_at %q is not a unix time", a.InfraApplied, f[1])
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("%s is malformed: applied_at %q is not a unix time", a.InfraApplied, f[1])
+	}
+	if n == 0 {
+		return 0, ErrFloorUnknown
 	}
 	return n, nil
 }
@@ -144,20 +156,30 @@ func (a *Agent) Cycle(ctx context.Context) (Outcome, error) {
 		return Outcome{}, err
 	}
 	a.floor = 0
+	var o Outcome
+	var served *Hub
+	var rejs []rejection
+	started := a.Now()
+	pre := false
 	if st.Verified == nil && st.Applied == nil {
-		if a.floor, err = a.LegacyFloor(); err != nil {
-			return Outcome{}, err
+		// A fresh state: infra-pull's record gives the floor, read here and only here (never at startup).
+		switch a.floor, err = a.LegacyFloor(); {
+		case errors.Is(err, ErrFloorUnknown):
+			o, pre = Outcome{Result: ResultUnchanged, Message: err.Error()}, true
+		case err != nil:
+			o, pre = Outcome{Result: ResultFailed, Message: err.Error()}, true
 		}
 	}
-	started := a.Now()
-	o, served, rejs := a.fetchAndApply(ctx, &st)
+	if !pre {
+		o, served, rejs = a.fetchAndApply(ctx, &st)
+	}
 	if st.Applied != nil {
 		o.AppliedCommit = st.Applied.Commit
 	}
 	if ctx.Err() != nil {
 		// Stopped from outside: what the cycle found is not a result, and the last real one stays in the state.
 		slog.Info("interrupted", "host", a.Cfg.Host, "result", o.Result)
-		return o, fmt.Errorf("interrupted: %w", ctx.Err())
+		return o, fmt.Errorf("%w: %v", ErrInterrupted, ctx.Err())
 	}
 	o.Message = truncate(o.Message, MaxMessage)
 	st.LastResult, st.LastMessage, st.LastHub = o.Result, o.Message, o.Hub
@@ -193,7 +215,7 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 	}
 	var (
 		served    *Hub
-		olderHub  *Hub // the first hub that served a bundle that is not newer
+		fallback  *Hub // the first hub whose answer was "nothing new" (304, the same bundle, an older one)
 		newBundle bool
 		rejs      []rejection
 		hubErrs   int
@@ -222,23 +244,20 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 			slog.Warn("hub did not give a bundle, trying the next", "hub", hub.URL, "err", err)
 			continue
 		}
-		if notModified {
-			served = hub
-			slog.Debug("bundle unchanged", "hub", hub.URL)
-			break
-		}
-		if status == statusOlder {
-			// Another hub may be ahead of this one: ask on before falling back to what is already verified.
-			if olderHub == nil {
-				olderHub = hub
+		if notModified || status != statusNew {
+			// Nothing new from this hub, but another may be ahead of it (a mirror that lags): ask on, and fall back to
+			// what is already verified only when every hub has answered.
+			slog.Debug("nothing new", "hub", hub.URL)
+			if fallback == nil {
+				fallback = hub
 			}
 			continue
 		}
-		served, newBundle = hub, status == statusNew
+		served, newBundle = hub, true
 		break
 	}
 	if served == nil {
-		served = olderHub
+		served = fallback
 	}
 	if served == nil {
 		if len(rejs) > 0 {
@@ -293,6 +312,13 @@ func (a *Agent) decide(ctx context.Context, st *State, served *Hub, target strin
 		return o
 	}
 	defer lock.Close()
+	// infra-pull's protocol: the holder writes lock.since (epoch seconds) atomically after getting the lock, and removes it
+	// when it lets go; a waiting infra-pull reads its age to tell a stuck holder from a working one.
+	since := filepath.Join(filepath.Dir(a.InfraLock), "lock.since")
+	if err := writeSince(since, a.Now().Unix()); err != nil {
+		slog.Warn("cannot write lock.since", "path", since, "err", err)
+	}
+	defer removeSince(since)
 	slog.Info("applying", "host", cfg.Host, "commit", target)
 	if err := Apply(ctx, a.Ansible, ReleaseDir(cfg.StateDir, target), cfg.Host, cfg.AgeKey, a.Out); err != nil {
 		slog.Error("apply failed", "host", cfg.Host, "commit", target, "err", err)
@@ -307,6 +333,19 @@ func (a *Agent) decide(ctx context.Context, st *State, served *Hub, target strin
 	}
 	o.Result, o.Message = ResultOK, fmt.Sprintf("applied %s", short(target))
 	return o
+}
+
+// writeSince writes "<epoch>\n" to path through path+".new" and a rename, as infra-pull does.
+func writeSince(path string, epoch int64) error {
+	if err := os.WriteFile(path+".new", []byte(strconv.FormatInt(epoch, 10)+"\n"), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(path+".new", path)
+}
+
+func removeSince(path string) {
+	os.Remove(path)
+	os.Remove(path + ".new")
 }
 
 type bundleStatus int
@@ -376,6 +415,11 @@ func (a *Agent) accept(ctx context.Context, st *State, body io.Reader) (bundle.S
 // note is in the message), every hub gets it, so the first and the rejecting hub also learn what happened.
 func (a *Agent) report(ctx context.Context, served *Hub, rejs []rejection, o Outcome) bool {
 	rep := ReportBody{AppliedCommit: o.AppliedCommit, Result: o.Result, Message: o.Message, Time: a.Now().UTC().Format(time.RFC3339)}
+	for _, r := range rejs {
+		if len(rep.RejectedHubs) < 8 && !contains(rep.RejectedHubs, r.hub.URL) {
+			rep.RejectedHubs = append(rep.RejectedHubs, r.hub.URL)
+		}
+	}
 	all := served == nil || len(a.Hubs) > 0 && served != a.Hubs[0] || len(rejs) > 0
 	order := make([]*Hub, 0, len(a.Hubs))
 	if served != nil {

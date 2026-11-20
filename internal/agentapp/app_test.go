@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/KazuhaHub/infra-hub/internal/agent"
 	"github.com/KazuhaHub/infra-hub/internal/agenttest"
@@ -239,8 +241,12 @@ func TestConfigurationErrorsFromTheFilesExitTwo(t *testing.T) {
 	envFile := writeEnvFile(t, w, "verify", []string{hub.URL}, []string{hub.Pin})
 	os.WriteFile(filepath.Join(w.Dir, "infra-applied"), []byte("broken"), 0o644)
 	code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile)...)
-	if code != 2 || !strings.Contains(errs, "malformed") {
+	if code != 1 || !strings.Contains(errs, "malformed") { // a failed cycle, never a crash
 		t.Errorf("malformed applied record: exit %d %q", code, errs)
+	}
+	os.WriteFile(filepath.Join(w.Dir, "infra-applied"), []byte(strings.Repeat("a", 40)+" 0\n"), 0o644)
+	if code, _, errs = runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile)...); code != 0 {
+		t.Errorf("applied_at 0: exit %d %q", code, errs)
 	}
 	os.Remove(filepath.Join(w.Dir, "infra-applied"))
 	os.MkdirAll(w.StateDir, 0o755)
@@ -248,5 +254,22 @@ func TestConfigurationErrorsFromTheFilesExitTwo(t *testing.T) {
 	code, _, errs = runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile)...)
 	if code != 2 || !strings.Contains(errs, "must be 0700") {
 		t.Errorf("state dir: exit %d %q", code, errs)
+	}
+}
+
+func TestRunOnceInterruptedBySignalExitsThree(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{})
+	envFile := writeEnvFile(t, w, "apply", []string{hub.URL}, []string{hub.Pin})
+	slow := filepath.Join(w.Dir, "slow")
+	os.WriteFile(slow, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755)
+	go func() {
+		time.Sleep(1500 * time.Millisecond) // the cycle is inside ansible by then
+		syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	}()
+	code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile, "--ansible", slow)...)
+	if code != 3 || !strings.Contains(errs, "interrupted") {
+		t.Fatalf("exit %d: %s", code, errs)
 	}
 }

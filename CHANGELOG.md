@@ -15,7 +15,8 @@
 
 - `POST /v1/report` accepts the results `verified`, `rejected`, `unreachable` and `unchanged` besides `ok` and `failed`, and
   `appliedCommit` may be empty (nothing applied yet). A report with another result is still refused with `400 bad_report`,
-  and a non-empty `appliedCommit` must still be a full lower-case commit id. `status -o json` leaves `appliedCommit` out
+  and a non-empty `appliedCommit` must still be a full lower-case commit id. A report may carry `rejectedHubs`, at most 8
+  hub URLs (the hubs that served the agent a bundle it rejected); `infra-hub status` shows them in the table and in JSON. `status -o json` leaves `appliedCommit` out
   when it is empty.
 
 ## v0.5.0

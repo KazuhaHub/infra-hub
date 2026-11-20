@@ -24,7 +24,9 @@ type HostReport struct {
 	Message       string           `json:"message,omitempty"`
 	Time          string           `json:"time"` // RFC 3339, as the agent stated it
 	Features      []FeatureSummary `json:"features,omitempty"`
-	ReceivedAt    string           `json:"receivedAt"` // RFC 3339 UTC, the hub's clock
+	// RejectedHubs are the hubs that served the agent a bundle it rejected in that cycle (hub URLs).
+	RejectedHubs []string `json:"rejectedHubs,omitempty"`
+	ReceivedAt   string   `json:"receivedAt"` // RFC 3339 UTC, the hub's clock
 }
 
 // FeatureSummary is the outcome of one feature in a report.

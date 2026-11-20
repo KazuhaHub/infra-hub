@@ -340,3 +340,28 @@ func TestReportAcceptsAgentResults(t *testing.T) {
 		nonce = h.challenge(t, "h1")
 	}
 }
+
+func TestReportRejectedHubs(t *testing.T) {
+	h := newHub(t)
+	send := func(hubs string) (int, map[string]any) {
+		h.now = h.now.Add(time.Minute)
+		nonce := h.challenge(t, "h1")
+		return h.do(t, "POST", "/v1/report", reportBodyFor("h1", nonce, `{"appliedCommit":"`+commit+`","result":"verified","time":"2026-11-19T08:00:00Z","rejectedHubs":`+hubs+`}`))
+	}
+	if code, doc := send(`["https://hub1.example.org:8443","https://192.0.2.10"]`); code != 200 {
+		t.Fatalf("%d %v", code, doc)
+	}
+	if got := h.store.st.Reports()["h1"].RejectedHubs; len(got) != 2 || got[0] != "https://hub1.example.org:8443" {
+		t.Errorf("stored %v", got)
+	}
+	nine := `["https://a.example.org","https://b.example.org","https://c.example.org","https://d.example.org","https://e.example.org","https://f.example.org","https://g.example.org","https://h.example.org","https://i.example.org"]`
+	for name, v := range map[string]string{"nine": nine, "not a url": `["hub"]`, "path": `["https://a.example.org/x"]`, "http": `["http://a.example.org"]`, "not a list": `"https://a.example.org"`} {
+		if code, _ := send(v); code != 400 {
+			t.Errorf("%s: %d", name, code)
+		}
+	}
+	eight := strings.Replace(nine, `,"https://i.example.org"`, "", 1)
+	if code, doc := send(eight); code != 200 {
+		t.Errorf("eight: %d %v", code, doc)
+	}
+}
