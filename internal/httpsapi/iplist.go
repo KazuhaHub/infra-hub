@@ -1,8 +1,6 @@
 package httpsapi
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -44,9 +42,10 @@ func (s *Server) iplist(w http.ResponseWriter, r *http.Request, name string) {
 		return
 	}
 	body = append(body, '\n')
-	sum := sha256.Sum256(body)
 	slog.Info("iplist served", "list", name, "peer", peer, "version", p.Version, "entries", len(p.CIDRs), "warnings", len(p.Warnings))
-	etag := `"` + hex.EncodeToString(sum[:]) + `"`
+	// The validator is the list's version (a hash of its entries), not of the body: the body carries `generated`, which
+	// changes at every request, and warnings, which are not part of the version.
+	etag := `"` + p.Version + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "no-cache")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {

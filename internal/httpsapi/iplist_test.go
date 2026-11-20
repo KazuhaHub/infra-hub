@@ -1,8 +1,6 @@
 package httpsapi
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -48,8 +46,7 @@ func TestIPListServed(t *testing.T) {
 	if string(r.body) != string(line)+"\n" {
 		t.Fatalf("body %q, SSH line %q", r.body, line)
 	}
-	sum := sha256.Sum256(r.body)
-	if etag := r.header.Get("ETag"); etag != `"`+hex.EncodeToString(sum[:])+`"` {
+	if etag := r.header.Get("ETag"); etag != `"v1abc"` {
 		t.Errorf("ETag %q", etag)
 	}
 	etag := r.header.Get("ETag")
@@ -61,7 +58,11 @@ func TestIPListServed(t *testing.T) {
 	if r := h.get(t, "192.0.2.1:1", "GET", "/v1/iplist/cdn", map[string]string{"If-None-Match": `"other"`}); r.code != 200 {
 		t.Errorf("other etag: %d", r.code)
 	}
-	f.p.CIDRs = append(f.p.CIDRs, "11.3.0.0/24")
+	f.p.Generated = "2026-11-20T01:00:00Z" // a new timestamp alone keeps the validator
+	if r := h.get(t, "192.0.2.1:1", "GET", "/v1/iplist/cdn", map[string]string{"If-None-Match": etag}); r.code != 304 {
+		t.Errorf("new generated time: %d", r.code)
+	}
+	f.p.Version = "v1def"
 	if r := h.get(t, "192.0.2.1:1", "GET", "/v1/iplist/cdn", map[string]string{"If-None-Match": etag}); r.code != 200 {
 		t.Errorf("changed list: %d", r.code)
 	}

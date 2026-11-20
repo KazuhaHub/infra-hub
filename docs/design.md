@@ -46,8 +46,8 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
   payload, so it is a new endpoint, not a change of this one.
 - **IP lists.** Implemented in phase 3b: `GET /v1/iplist/<name>` is public data (provider ranges and manual entries),
   so it has no host in the path, no encryption and no allow list; the payload is the one `iplist <name>` sends. Its
-  `ETag` is the sha256 of the body, and the body carries `generated`, so a validator only matches while the hub keeps
-  serving the same rendering. Signing the lists with a hub signing key whose public half is part of the signed bundle
+  `ETag` is the list's `version` (quoted), a hash of its entries, so `If-None-Match` gives a `304` although `generated`
+  changes at every request. Signing the lists with a hub signing key whose public half is part of the signed bundle
   remains an option.
 - **SSH is optional.** A hub without `listen` in its config runs no SSH server; certificates and IP lists are still
   issued and refreshed. The SSH commands stay as they were for hubs that keep `listen`. Removing SSH is phase 4.
