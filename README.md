@@ -77,10 +77,6 @@ mirror has not fetched yet).
 lower camelCase keys, RFC 3339 UTC times, durations as `...Seconds`, hosts, certificates, providers and lists as arrays
 sorted by name.
 
-Deprecated, removed in the next release: the old spellings `-config`, `-no-refs`, `-limit`, `iplist-accept` and
-`iplist-history` still work and print a warning on stderr. With `-config`, `status` keeps printing the previous
-snake_case JSON (also available as the hidden `--format legacy`) unless `-o` is given.
-
 - **HTTPS for agents.** `https.listen` is required (it is the hub's only listener). The hub serves `GET /v1/healthz`, `POST /v1/challenge`,
   `POST /v1/report`, `GET /v1/wait/<host>` (long poll: answers when the bundle changed), `GET /install` (the agent install script), `GET /v1/bundle/<host>` (the age-encrypted config bundle, format in
   [docs/bundle.md](docs/bundle.md)), `GET /v1/cert/<host>/<name>` (the owner's certificate and key, age-encrypted to the

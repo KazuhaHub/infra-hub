@@ -13,7 +13,7 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
 | 3d | Install script: `GET /install` | done (v0.12.0) |
 | 3 | Self-update, the CSR model for certificates, the IP list fetcher in the agent | open |
 | 4a | SSH removed from the hub: `internal/sshserver`, the git upload-pack serving, `listen`, `hostKey`, `clients.*.sshKey` and `ipLists.*.hosts` are gone from the code and still accepted (ignored, one warning) in the config | done (v0.10.0) |
-| 4 | Hub key rotation across agents | open |
+| 4 | Hub key rotation across agents: tokens list several pins, `docs/hub-key.md` is the runbook, `TestHubKeyRotation` covers it | done |
 
 ## Goals
 

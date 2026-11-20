@@ -62,20 +62,30 @@ first); a pin that is given twice is listed once. Do not decrypt the key just to
 
 ## Rotating the key
 
-Rotate when the key may have leaked, or whenever you like. Agents accept a list of pins, so a rotation never cuts
-anyone off:
+Rotate when the key may have leaked, or whenever you like. A token holds a list of pins and an agent accepts a hub that
+presents any of them, so a rotation never cuts an agent off, as long as the order below is kept. `internal/agent`'s
+`TestHubKeyRotation` runs exactly these steps (old hub with a token of both pins, the same address with the new key,
+then a token of the new pin only; a token of the new pin refuses the old hub, a token of the old pin refuses the new
+hub).
 
-1. `infra-hub key init --out ./hub-new.key`, and store it as above.
-2. **Agents first.** Add the new pin to the agents' pin list (a reviewed change in the infra repository) and wait until
-   every agent has applied it. During this time hubs still use the old key and agents accept both pins. Tokens for
-   new installs carry both pins during the rotation:
-   `infra-hub token --pin <old pin> --pin <new pin> --hub ...`.
-3. **Then the hubs.** Deploy the new key to every hub's `https.key` path and restart the hubs. Agents accept the new
-   pin.
-4. Remove the old pin from the agents (and from new tokens) and delete the old SOPS file.
+Where the pins live in the private infra repository: the agents' pins are in the token `infra_agent_token` in
+`inventory/group_vars/all.yml`, built from the list `hub_identity_pins` in the same file (the IP list client reads that list).
+The private key of the hubs is `hub_identity_key` in each hub's SOPS file.
 
-If you switch the hubs before the agents know the new pin, those agents cannot reach any hub until they are given the
-pin by hand.
+1. **New key.** On a trusted machine: `infra-hub key init --out ./hub-new.key` (prints the new pin). Do not touch the
+   hubs yet.
+2. **Agents first.** In `inventory/group_vars/all.yml` add the new pin to `hub_identity_pins` (the list then holds the old
+   and the new pin) and rebuild `infra_agent_token` with `infra-hub token --pin <each pin> --hub <url> --hub <url>`
+   (same `--hub` URLs and order as now). Merge it and wait until every agent has applied it (every
+   host's report in `infra-hub status` shows the new commit). The hubs still use the old key.
+3. **Hubs.** Put the new key into each hub's SOPS file as `hub_identity_key` (replace the old value; every hub gets the
+   same key), delete `./hub-new.key`, deploy, and restart the hubs (the deploy does it). Agents accept the new pin. Check
+   with `infra-hub status` that hosts keep reporting.
+4. **Drop the old pin.** Remove the old pin from `hub_identity_pins`, rebuild the token with
+   `infra-hub token --pin <new pin> --hub ...` and merge. New installs use this token as well.
+
+If the hubs are switched before every agent has the new pin, those agents cannot reach any hub until they are given the
+pin by hand. To undo step 3 put the old key back into SOPS and restart the hubs; the agents still accept it until step 4.
 
 ## If the key leaks
 

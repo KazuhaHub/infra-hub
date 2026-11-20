@@ -1,8 +1,7 @@
 // Package report builds the JSON documents the hub prints: `infra-hub status -o json` and `infra-hub iplist history`.
 //
 // The documents follow docs/conventions.md: apiVersion "v1", lower camelCase names, RFC 3339 UTC times, durations
-// as integer seconds with the unit in the name, lists as arrays sorted by name, missing values omitted. The
-// previous snake_case status document is still available through Legacy until the machines that parse it have moved.
+// as integer seconds with the unit in the name, lists as arrays sorted by name, missing values omitted.
 package report
 
 import (
@@ -190,43 +189,6 @@ func NewStatus(in StatusInput) Status {
 				Version: l.Version, Warnings: strs(l.Warnings), History: NewHistoryEntries(l.History)})
 		}
 		out.IPLists = ip
-	}
-	return out
-}
-
-// legacyStatus is the snake_case document of releases before apiVersion v1. It is kept byte for byte so that a
-// monitor that parses it keeps working; it is selected with `status --format legacy`.
-type legacyStatus struct {
-	Time              string                      `json:"time"`
-	Main              string                      `json:"main"`
-	MainAttestation   string                      `json:"main_attestation"`
-	MirrorLastSuccess *string                     `json:"mirror_last_success"`
-	MirrorAge         *int64                      `json:"mirror_age_seconds"`
-	Hosts             map[string]state.NodeRecord `json:"hosts"`
-	Issuer            string                      `json:"issuer"`
-	Certs             map[string]certs.CertStatus `json:"certs"`
-	IPLists           *iplists.IPStatus           `json:"iplists,omitempty"`
-}
-
-// Legacy renders the previous document.
-func Legacy(in StatusInput) any {
-	hosts := map[string]state.NodeRecord{}
-	for _, name := range in.Hosts { // last_seen is the time of the host's latest report (the SSH server that fed it is gone)
-		var rec state.NodeRecord
-		if r, ok := in.Reports[name]; ok {
-			rec.LastSeen, _ = time.Parse(time.RFC3339, r.ReceivedAt)
-		}
-		hosts[name] = rec
-	}
-	out := legacyStatus{Time: in.Now.UTC().Format(time.RFC3339), Main: in.Main, MainAttestation: in.MainAttestation,
-		Hosts: hosts, Issuer: in.Issuer, Certs: in.Certs, IPLists: in.IPLists}
-	if out.Certs == nil {
-		out.Certs = map[string]certs.CertStatus{}
-	}
-	if !in.MirrorLastSuccess.IsZero() {
-		age := int64(in.Now.Sub(in.MirrorLastSuccess).Seconds())
-		ts := in.MirrorLastSuccess.UTC().Format(time.RFC3339)
-		out.MirrorAge, out.MirrorLastSuccess = &age, &ts
 	}
 	return out
 }

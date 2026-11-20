@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.12.0 (unreleased)
+## v0.12.0
 
 ### Added
 
@@ -18,6 +18,30 @@
   Debian/Ubuntu, creates `/etc/infra` and the age key (prints the public key), writes `agent.env`, installs the latest
   release of `infra-agent` (checked against `SHA256SUMS`) and its systemd unit without starting it, and prints the next
   steps. `--hub` also creates the deploy key. Details in [docs/agent.md](docs/agent.md).
+
+### Removed
+
+- The first releases' command-line spellings: `-config`, `-no-refs` and `-limit` (single dash), `iplist-accept` and
+  `iplist-history` are gone (they were aliases that printed a deprecation warning); use `--config`, `--no-refs`,
+  `--limit`, `iplist accept` and `iplist history`. They are now usage errors (exit 2).
+- The hidden `status --format legacy` and the previous snake_case status document, and the old JSON of
+  `iplist-history`. Use `status -o json` and `iplist history` (`docs/conventions.md`).
+- Config compatibility is unchanged: the snake_case config keys and the removed SSH keys still load with a warning.
+
+### Changed
+
+- The warning of a held IP list update says `see infra-hub iplist accept` (it named the removed `iplist-accept`).
+
+### Tests
+
+- Hub key rotation end to end (`TestHubKeyRotation`): a token with `[old, new]` pins works against a hub with the old
+  key and, after the hub restarts at the same address, with the new key; a token with only the new pin refuses the old
+  hub, and one with only the old pin refuses the new hub. `agenttest` can start a hub with a given key and address.
+
+### Documentation
+
+- `docs/hub-key.md`: the rotation as an exact runbook (where the pins and the hub key live in the infra repository);
+  `docs/design.md` phase 4 (hub key rotation) is done.
 
 ### Fixed
 

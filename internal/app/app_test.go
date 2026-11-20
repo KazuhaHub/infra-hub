@@ -144,63 +144,13 @@ func TestEnvironmentSuppliesFlags(t *testing.T) {
 	}
 }
 
-func TestOldSpellingsStillWork(t *testing.T) {
+func TestIPListHistoryAndAccept(t *testing.T) {
 	h := newHub(t)
 	h.markMirrored(t)
-
-	// -config and -no-refs, with a warning each
-	code, out, errs := run(t, "status", "-config", h.config, "-no-refs")
-	if code != ExitOK {
-		t.Fatalf("exit %d: %s", code, errs)
-	}
-	for _, flag := range []string{"-config", "-no-refs"} {
-		if !strings.Contains(errs, "warning: "+flag+" is deprecated") {
-			t.Errorf("no deprecation warning for %s: %q", flag, errs)
-		}
-	}
-	var legacy map[string]any
-	if err := json.Unmarshal([]byte(out), &legacy); err != nil {
-		t.Fatal(err)
-	}
-	for _, k := range []string{"mirror_last_success", "mirror_age_seconds", "main_attestation", "hosts", "certs", "issuer", "time"} {
-		if _, ok := legacy[k]; !ok {
-			t.Errorf("legacy status lacks %q", k)
-		}
-	}
-	if _, ok := legacy["apiVersion"]; ok {
-		t.Error("legacy status carries apiVersion")
-	}
-	if _, ok := legacy["hosts"].(map[string]any)["h1"]; !ok {
-		t.Error("legacy hosts is not a map keyed by name")
-	}
-
-	// -config=<file> form; an explicit -o asks for the new document even with the old spelling
-	_, out, _ = run(t, "status", "-config="+h.config, "--no-refs", "-o", "json")
-	if !strings.Contains(out, `"apiVersion": "v1"`) {
-		t.Errorf("-o json with -config did not give v1: %q", out)
-	}
-	// the new spelling gives the new document by default only with -o json; --format legacy is the hidden way back
-	_, out, _ = run(t, "status", "--config", h.config, "--no-refs", "--format", "legacy")
-	if !strings.Contains(out, `"mirror_age_seconds"`) {
-		t.Errorf("--format legacy: %q", out)
-	}
-	if code, _, _ := run(t, "status", "--config", h.config, "--no-refs", "--format", "v2"); code != ExitUsage {
-		t.Errorf("unknown format: exit %d", code)
-	}
-
-	// iplist-history: old name, old JSON
 	if err := iplists.AppendHistory(h.dirIPLists(t), "edge", iplists.HistoryEntry{Time: "2026-11-19T08:00:00Z", Event: "first fetch", Provider: "cdn", CountAfter: 2}); err != nil {
 		t.Fatal(err)
 	}
-	code, out, errs = run(t, "iplist-history", "-config", h.config, "edge", "-limit", "1")
-	if code != ExitOK || !strings.Contains(errs, "iplist-history is deprecated") || !strings.Contains(errs, "-limit is deprecated") {
-		t.Fatalf("iplist-history: exit %d, stderr %q", code, errs)
-	}
-	if !strings.Contains(out, `"count_after": 2`) || strings.Contains(out, "apiVersion") {
-		t.Errorf("iplist-history output is not the old JSON: %s", out)
-	}
-	// iplist history: new name, new JSON
-	code, out, errs = run(t, "iplist", "history", "edge", "--config", h.config, "--limit", "1")
+	code, out, errs := run(t, "iplist", "history", "edge", "--config", h.config, "--limit", "1")
 	if code != ExitOK || errs != "" {
 		t.Fatalf("iplist history: exit %d, stderr %q", code, errs)
 	}
@@ -210,11 +160,28 @@ func TestOldSpellingsStillWork(t *testing.T) {
 	if _, out, _ := run(t, "iplist", "history", "edge", "--config", h.config, "-o", "table"); !strings.Contains(out, "first fetch") {
 		t.Errorf("table: %q", out)
 	}
+	code, _, errs = run(t, "iplist", "accept", "--config", h.config, "cdn")
+	if code != ExitFailed || !strings.Contains(errs, "has no held update") {
+		t.Errorf("iplist accept: exit %d, stderr %q", code, errs)
+	}
+}
 
-	// iplist-accept: old name, warns, and fails the same way as the new one when nothing is held
-	code, _, errs = run(t, "iplist-accept", "-config", h.config, "cdn")
-	if code != ExitFailed || !strings.Contains(errs, "iplist-accept is deprecated") || !strings.Contains(errs, "has no held update") {
-		t.Errorf("iplist-accept: exit %d, stderr %q", code, errs)
+// The spellings of the first releases are gone: they are usage errors, not aliases.
+func TestRemovedSpellingsAreRefused(t *testing.T) {
+	h := newHub(t)
+	h.markMirrored(t)
+	for _, args := range [][]string{
+		{"status", "-config", h.config, "-no-refs"},
+		{"iplist-accept", "--config", h.config, "cdn"},
+		{"iplist-history", "--config", h.config, "edge"},
+		{"status", "--config", h.config, "--no-refs", "--format", "legacy"},
+	} {
+		if code, _, _ := run(t, args...); code != ExitUsage {
+			t.Errorf("%v: exit %d, want %d", args, code, ExitUsage)
+		}
+	}
+	if code, _, errs := run(t, "status", "--config", h.config, "--no-refs", "-o", "json"); code != ExitOK || errs != "" {
+		t.Errorf("status: exit %d, %q", code, errs)
 	}
 }
 
@@ -225,33 +192,6 @@ func (h hubDir) dirIPLists(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return cfg.IPListDir
-}
-
-func TestHiddenAliasesAreNotListedInHelp(t *testing.T) {
-	_, out, _ := run(t, "--help")
-	for _, hidden := range []string{"iplist-accept", "iplist-history"} {
-		if strings.Contains(out, hidden) {
-			t.Errorf("help lists %s", hidden)
-		}
-	}
-	_, out, _ = run(t, "status", "--help")
-	if strings.Contains(out, "--format") {
-		t.Error("status help lists --format")
-	}
-}
-
-func TestRewriteLegacyFlags(t *testing.T) {
-	out, warns, legacyConfig := rewriteLegacyFlags([]string{"status", "-config", "c.json", "-no-refs", "-config=d", "--", "-config"})
-	if got := strings.Join(out, " "); got != "status --config c.json --no-refs --config=d -- -config" {
-		t.Errorf("rewritten: %q", got)
-	}
-	if len(warns) != 2 || !legacyConfig {
-		t.Errorf("warnings %v, legacyConfig %v", warns, legacyConfig)
-	}
-	out, warns, legacyConfig = rewriteLegacyFlags([]string{"status", "--config", "c.json", "-o", "json"})
-	if strings.Join(out, " ") != "status --config c.json -o json" || len(warns) != 0 || legacyConfig {
-		t.Errorf("new spelling touched: %v %v %v", out, warns, legacyConfig)
-	}
 }
 
 func TestStatusWithNoRefsRunsNoGit(t *testing.T) {
@@ -302,28 +242,5 @@ func TestLegoLogGoesThroughTheLogger(t *testing.T) {
 		if format == "json" && !strings.HasPrefix(got, "{") {
 			t.Errorf("lego output is not JSON: %s", got)
 		}
-	}
-}
-
-func TestStatusWarningNamesTheReplacementThatKeepsScriptsWorking(t *testing.T) {
-	_, warns, _ := rewriteLegacyFlags([]string{"status", "-config", "c.json", "-no-refs"})
-	if len(warns) < 1 || !strings.Contains(warns[0], "--config <file> -o json") || !strings.Contains(warns[0], "--format legacy") ||
-		!strings.Contains(warns[0], "JSON keys change") || !strings.Contains(warns[0], migrationNote) {
-		t.Errorf("status warning: %v", warns)
-	}
-	_, warns, _ = rewriteLegacyFlags([]string{"iplist-history", "-config", "c.json", "edge"})
-	if len(warns) != 1 || strings.Contains(warns[0], "-o json") {
-		t.Errorf("other commands get the plain advice: %v", warns)
-	}
-}
-
-// Only flags on the command line choose the old default; the environment does not.
-func TestLegacyDefaultIgnoresTheEnvironment(t *testing.T) {
-	h := newHub(t)
-	h.markMirrored(t)
-	t.Setenv("INFRA_HUB_OUTPUT", "json")
-	_, out, _ := run(t, "status", "-config", h.config, "--no-refs")
-	if !strings.Contains(out, `"mirror_age_seconds"`) {
-		t.Errorf("INFRA_HUB_OUTPUT switched the old default away: %s", out)
 	}
 }

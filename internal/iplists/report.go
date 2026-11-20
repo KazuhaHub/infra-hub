@@ -1,8 +1,6 @@
 package iplists
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 )
@@ -50,20 +48,4 @@ func diffSets(a, b []string) (same int, removed, added []string) {
 		}
 	}
 	return
-}
-
-// HistoryReport prints the change history of one list as JSON ({"list", "entries"}), newest last.
-func HistoryReport(dir string, lists map[string]IPList, list string, limit int, w io.Writer) error {
-	if _, ok := lists[list]; !ok {
-		return fmt.Errorf("%q is not a list in the config", list)
-	}
-	if limit < 0 {
-		return errors.New("limit must not be negative")
-	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(struct {
-		List    string         `json:"list"`
-		Entries []HistoryEntry `json:"entries"`
-	}{list, ReadHistory(dir, list, limit)})
 }
