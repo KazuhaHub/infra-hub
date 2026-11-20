@@ -131,8 +131,9 @@ func TestOldConfigFieldsAreIgnored(t *testing.T) {
 	cfg["https"] = map[string]any{"listen": "192.0.2.10:8443", "caCert": "/etc/infra-hub/ca.crt", "cert": "/etc/infra-hub/hub.crt"}
 	data, _ = json.Marshal(cfg)
 	os.WriteFile(h.config, data, 0o600)
+	// The old fields are ignored with a warning, which leaves no HTTPS listener: the config is refused.
 	code, _, errs := run(t, "status", "--config", h.config, "--no-refs")
-	if code != 0 || !strings.Contains(errs, "https.key") || !strings.Contains(errs, "https is off") {
+	if code == 0 || !strings.Contains(errs, "https.key") || !strings.Contains(errs, "https is off") || !strings.Contains(errs, "https.listen is not set") {
 		t.Errorf("old config: %d %q", code, errs)
 	}
 }

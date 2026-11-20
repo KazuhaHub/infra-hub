@@ -1,17 +1,12 @@
-// Package testutil holds helpers shared by the tests: git repositories and SSH keys.
+// Package testutil holds helpers shared by the tests: git repositories.
 package testutil
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/pem"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"golang.org/x/crypto/ssh"
 
 	"github.com/KazuhaHub/infra-hub/internal/gitmirror"
 )
@@ -56,36 +51,4 @@ func MakeUpstream(t *testing.T) (bare string, work string) {
 	bare = filepath.Join(dir, "upstream.git")
 	RunGit(t, dir, "clone", "-q", "--bare", work, bare)
 	return bare, work
-}
-
-// NewKey is NewKeyPriv without the private key.
-func NewKey(t *testing.T) (ssh.Signer, string) {
-	s, line, _ := NewKeyPriv(t)
-	return s, line
-}
-
-// NewKeyPriv makes an ed25519 key and returns it as a signer, an authorized_keys line and the private key.
-func NewKeyPriv(t *testing.T) (ssh.Signer, string, ed25519.PrivateKey) {
-	t.Helper()
-	_, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return s, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(s.PublicKey()))), priv
-}
-
-// WritePrivateKey writes priv as an OpenSSH private key file for the ssh binary.
-func WritePrivateKey(t *testing.T, path string, priv ed25519.PrivateKey) {
-	t.Helper()
-	block, err := ssh.MarshalPrivateKey(priv, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, pem.EncodeToMemory(block), 0o600); err != nil {
-		t.Fatal(err)
-	}
 }

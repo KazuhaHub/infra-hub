@@ -12,9 +12,11 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,12 +24,13 @@ import (
 	"testing"
 	"time"
 
+	"filippo.io/age"
 	legolog "github.com/go-acme/lego/v4/log"
-	"golang.org/x/crypto/ssh"
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/config"
 	"github.com/KazuhaHub/infra-hub/internal/hubkey"
+	"github.com/KazuhaHub/infra-hub/internal/hubtrust"
 	"github.com/KazuhaHub/infra-hub/internal/logx"
 	"github.com/KazuhaHub/infra-hub/internal/testutil"
 )
@@ -95,20 +98,16 @@ func TestServeLogHasNoSecrets(t *testing.T) {
 				t.Cleanup(func() { newIssuer = prevIssuer })
 			}
 			dir := t.TempDir()
-			signer, clientKey := testutil.NewKey(t)
-			stranger, _ := testutil.NewKey(t)
-			ln, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			addr := ln.Addr().String()
-			ln.Close()
+			addr := freeAddr(t)
+			keyPath, pin := writeHubKey(t, dir)
+			id, _ := age.GenerateX25519Identity()
 			tokenFile := filepath.Join(dir, "cf_token")
 			os.WriteFile(tokenFile, []byte(cfToken+"\n"), 0o600)
 			cfgData, _ := json.Marshal(map[string]any{
-				"listen": addr, "repo": filepath.Join(dir, "infra.git"), "upstream": filepath.Join(dir, "no-such-upstream.git"),
-				"hostKey": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": clientKey},
-				"certs": map[string]string{"stored.example.org": "h1", "new.example.org": "h1"}, "cloudflareTokenFile": tokenFile,
+				"repo": filepath.Join(dir, "infra.git"), "upstream": filepath.Join(dir, "no-such-upstream.git"),
+				"httpsAddresses": []string{"127.0.0.1"}, "https": map[string]any{"listen": addr, "key": keyPath},
+				"clients": map[string]any{"h1": map[string]string{"agePublicKey": id.Recipient().String()}},
+				"certs":   map[string]string{"stored.example.org": "h1", "new.example.org": "h1"}, "cloudflareTokenFile": tokenFile,
 				"acmeDirectory": "https://127.0.0.1:1/directory",
 			})
 			cfg, err := config.ParseConfig(cfgData)
@@ -134,31 +133,26 @@ func TestServeLogHasNoSecrets(t *testing.T) {
 			go func() { serve(ctx, cfg); close(done) }()
 			t.Cleanup(func() { cancel(); <-done })
 
-			waitFor(t, logs, "listening")
-			hostKey, _ := os.ReadFile(cfg.HostKey)
-			// one client fetches the stored certificate, one is turned away
-			for _, s := range []ssh.Signer{signer, stranger} {
-				c, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "infra", Auth: []ssh.AuthMethod{ssh.PublicKeys(s)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
+			waitFor(t, logs, "https listening")
+			// the owner's certificate is fetched (age-encrypted, so the key is not readable in the body); an unknown name is turned away
+			client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: hubtrust.Verifier{Pins: []string{pin}, Host: "127.0.0.1"}.TLSConfig()}}
+			for path, want := range map[string]int{"/v1/cert/h1/stored.example.org": 200, "/v1/cert/h1/unknown.example.org": 404} {
+				resp, err := client.Get("https://" + addr + path)
 				if err != nil {
-					continue
+					t.Fatal(err)
 				}
-				if sess, err := c.NewSession(); err == nil {
-					var out bytes.Buffer
-					sess.Stdout = &out
-					_ = sess.Run("cert stored.example.org")
-					if s == signer && !strings.Contains(out.String(), "PRIVATE KEY") {
-						t.Errorf("the owner did not get its certificate: %q", out.String())
-					}
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode != want || (want == 200 && strings.Contains(string(body), "PRIVATE KEY")) {
+					t.Errorf("%s: %d", path, resp.StatusCode)
 				}
-				c.Close()
 			}
-			waitFor(t, logs, "connection denied")
 			waitFor(t, logs, "cert served")
 			waitFor(t, logs, "certificate attempt failed") // new.example.org: the CA is unreachable
 			cancel()
 			<-done
 			out := logs.String()
-			for what, secret := range map[string]string{"Cloudflare token": cfToken, "certificate key": keyBody, "key header": "PRIVATE KEY", "host key": strings.TrimSpace(string(hostKey))} {
+			for what, secret := range map[string]string{"Cloudflare token": cfToken, "certificate key": keyBody, "key header": "PRIVATE KEY"} {
 				if secret != "" && strings.Contains(out, secret) {
 					t.Errorf("the log contains the %s:\n%s", what, out)
 				}
@@ -192,8 +186,38 @@ func waitFor(t *testing.T, b *syncBuffer, text string) {
 	}
 }
 
-// A hub identity key that is missing or readable by others turns HTTPS off, loudly, and leaves SSH up.
-func TestServeWithAnUnusableHTTPSKeyKeepsSSH(t *testing.T) {
+// freeAddr is a loopback address that nothing listens on now.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().String()
+}
+
+// writeHubKey writes a hub identity key into dir and returns its path and pin.
+func writeHubKey(t *testing.T, dir string) (path, pin string) {
+	t.Helper()
+	key, err := hubkey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin, err = hubkey.Pin(key); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := hubkey.Marshal(key)
+	path = filepath.Join(dir, "hub.key")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path, pin
+}
+
+// A hub identity key that is missing, readable by others or not a key makes the hub fail at start: HTTPS is its only
+// listener, so it must not idle.
+func TestServeWithAnUnusableHTTPSKeyFails(t *testing.T) {
 	good, err := hubkey.Generate()
 	if err != nil {
 		t.Fatal(err)
@@ -205,58 +229,27 @@ func TestServeWithAnUnusableHTTPSKeyKeepsSSH(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
-			signer, clientKey := testutil.NewKey(t)
-			ln, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			addr := ln.Addr().String()
-			ln.Close()
-			httpsLn, err := net.Listen("tcp", "127.0.0.1:0")
-			if err != nil {
-				t.Fatal(err)
-			}
-			httpsAddr := httpsLn.Addr().String()
-			httpsLn.Close()
+			httpsAddr := freeAddr(t)
 			keyPath := filepath.Join(dir, "hub.key")
 			setup(keyPath)
 			cfgData, _ := json.Marshal(map[string]any{
-				"listen": addr, "repo": filepath.Join(dir, "infra.git"), "upstream": filepath.Join(dir, "no-such-upstream.git"),
-				"hostKey": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": clientKey},
+				"repo": filepath.Join(dir, "infra.git"), "upstream": filepath.Join(dir, "no-such-upstream.git"),
 				"httpsAddresses": []string{"127.0.0.1"}, "https": map[string]any{"listen": httpsAddr, "key": keyPath},
 			})
 			cfg, err := config.ParseConfig(cfgData)
 			if err != nil {
 				t.Fatal(err)
 			}
-			logs := &syncBuffer{}
-			logger, err := logx.New(logs, "text", "debug")
-			if err != nil {
-				t.Fatal(err)
-			}
 			prev := slog.Default()
-			logx.Install(logger)
 			t.Cleanup(func() { slog.SetDefault(prev) })
-			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			go func() { serve(ctx, cfg); close(done) }()
-			t.Cleanup(func() { cancel(); <-done })
-
-			waitFor(t, logs, "https is off: cannot use the hub identity key")
-			waitFor(t, logs, "listening")
-			// SSH answers: the owner's key is accepted by the SSH server.
-			c, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "infra", Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)}, HostKeyCallback: ssh.InsecureIgnoreHostKey(), Timeout: 5 * time.Second})
-			if err != nil {
-				t.Fatalf("SSH is down: %v", err)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := serve(ctx, cfg); err == nil || ctx.Err() != nil {
+				t.Fatalf("serve returned %v (context error %v)", err, ctx.Err())
 			}
-			c.Close()
-			// HTTPS is off: nothing listens on its address.
 			if conn, err := net.DialTimeout("tcp", httpsAddr, time.Second); err == nil {
 				conn.Close()
 				t.Error("something listens on the HTTPS address")
-			}
-			if out := logs.String(); strings.Contains(out, "PRIVATE KEY") || strings.Contains(out, "https listening") {
-				t.Errorf("unexpected log content:\n%s", out)
 			}
 		})
 	}

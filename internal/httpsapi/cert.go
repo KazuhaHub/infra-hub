@@ -21,7 +21,7 @@ func notFoundCert(w http.ResponseWriter, host, name, peer string) {
 	writeError(w, http.StatusNotFound, "not_found", "no such certificate")
 }
 
-// cert answers GET /v1/cert/<host>/<name>: the JSON line that `cert <name>` sends over SSH, age-encrypted to the host.
+// cert answers GET /v1/cert/<host>/<name>: the certificate as one JSON line, age-encrypted to the host.
 // Anyone may ask (there is no credential); only the owner's age key can read the answer.
 func (s *Server) cert(w http.ResponseWriter, r *http.Request, host, name string) {
 	now := s.Now()

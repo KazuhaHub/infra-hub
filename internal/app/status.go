@@ -87,14 +87,13 @@ func collectStatus(ctx context.Context, cfg config.Config, noRefs bool, now time
 	}
 	store := certs.CertStore{Dir: cfg.CertDir}
 	in := report.StatusInput{Now: now.UTC(), Main: refs["refs/heads/main"], MainAttestation: refs["refs/heads/main-attestation"],
-		MirrorLastSuccess: st.MirrorSuccess(), Hosts: map[string]state.NodeRecord{}, Issuer: store.IssuerState(), Certs: store.Status(cfg.Certs)}
+		MirrorLastSuccess: st.MirrorSuccess(), Issuer: store.IssuerState(), Certs: store.Status(cfg.Certs)}
 	if len(cfg.IPLists) > 0 {
 		ips := newIPManager(cfg).Status()
 		in.IPLists = &ips
 	}
-	snap := st.Snapshot()
-	for name := range cfg.Clients { // every configured host appears, seen or not
-		in.Hosts[name] = snap[name]
+	for name := range cfg.Clients { // every configured host appears, reported or not
+		in.Hosts = append(in.Hosts, name)
 	}
 	in.Reports = st.Reports()
 	if !noRefs {
@@ -160,7 +159,7 @@ func writeStatusTable(w io.Writer, s report.Status) error {
 		fmt.Fprintf(w, "bundle:   none served (%s: %s)\n", b.Reason, b.Message)
 	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "\nHOST\tLAST SEEN\tMAIN\tREPORT")
+	fmt.Fprintln(tw, "\nHOST\tREPORT")
 	for _, h := range s.Hosts {
 		rep := "-"
 		if h.Report != nil {
@@ -169,7 +168,7 @@ func writeStatusTable(w io.Writer, s report.Status) error {
 				rep += " bad-bundle-from " + strings.Join(h.Report.RejectedHubs, ",")
 			}
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", h.Name, orDash(h.LastSeen), short12(h.Main), rep)
+		fmt.Fprintf(tw, "%s\t%s\n", h.Name, rep)
 	}
 	if len(s.Certs) > 0 {
 		fmt.Fprintln(tw, "\nCERT\tOWNER\tNOT AFTER\tRESULT\tFAILING")
@@ -182,9 +181,9 @@ func writeStatusTable(w io.Writer, s report.Status) error {
 		for _, p := range s.IPLists.Providers {
 			fmt.Fprintf(tw, "%s\t%s\t%d\t%t\t%t\n", p.Name, orDash(p.LastSuccess), p.Count, p.Held, p.Failing)
 		}
-		fmt.Fprintln(tw, "\nLIST\tENTRIES\tHOSTS\tWARNINGS")
+		fmt.Fprintln(tw, "\nLIST\tENTRIES\tWARNINGS")
 		for _, l := range s.IPLists.Lists {
-			fmt.Fprintf(tw, "%s\t%d\t%d\t%d\n", l.Name, l.Entries, len(l.Hosts), len(l.Warnings))
+			fmt.Fprintf(tw, "%s\t%d\t%d\n", l.Name, l.Entries, len(l.Warnings))
 		}
 	}
 	return tw.Flush()

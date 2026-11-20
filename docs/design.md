@@ -1,6 +1,6 @@
 # Target design
 
-Status: the hub speaks SSH (unchanged) and, since phase 1, HTTPS. The agent exists since phase 2 (it fetches, verifies,
+Status: the hub speaks HTTPS only; the SSH server was removed in v0.10.0 (phase 4a). The agent exists since phase 2 (it fetches, verifies,
 applies and reports the config bundle, see [agent.md](agent.md)); this document is what the remaining phases build towards.
 
 | Phase | Content | State |
@@ -10,7 +10,8 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
 | 3a | Hub side of `GET /v1/bundle/<host>` (format in [bundle.md](bundle.md)) | done |
 | 3b | Certificates and IP lists over HTTPS: `GET /v1/cert/<host>/<name>`, `GET /v1/iplist/<name>`, `infra-agent cert`; the SSH server is optional | done (the hub side and `infra-agent cert`; an agent-side IP list fetcher and the CSR model below are open) |
 | 3 | Install script, kick, self-update, the CSR model for certificates, the IP list fetcher in the agent | open |
-| 4 | Hub key rotation across agents, SSH removed | open |
+| 4a | SSH removed from the hub: `internal/sshserver`, the git upload-pack serving, `listen`, `hostKey`, `clients.*.sshKey` and `ipLists.*.hosts` are gone from the code and still accepted (ignored, one warning) in the config | done (v0.10.0) |
+| 4 | Hub key rotation across agents | open |
 
 ## Goals
 
@@ -36,21 +37,23 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
   `bundle.sig` and `bundle.tar.gz` from the tip of `main-attestation` in the mirror, takes the commit from the
   strictly parsed statement (it verifies neither signature nor hash: the hub is not trusted for integrity), and
   answers an age-encrypted ustar of the three files with `ETag` and `304`, or `503 no_bundle` / `503 stale_mirror`.
-- **Certificates.** Implemented in phase 3b: the hub obtains the certificate and holds its private key, as it does for
-  the SSH path, and `GET /v1/cert/<host>/<name>` returns the same JSON line as `cert <name>` (name, fullchain, privkey,
-  not_after), age-encrypted to the owner's `agePublicKey`. Unknown host, unknown name, a name owned by another host and a
+- **Certificates.** Implemented in phase 3b: the hub obtains the certificate and holds its private key, and
+  `GET /v1/cert/<host>/<name>` returns a JSON line (name, fullchain, privkey, not_after), age-encrypted to the owner's `agePublicKey`. Unknown host, unknown name, a name owned by another host and a
   host without an age key all answer the same `404 not_found`; a missing certificate or one with less than 7 days left
   is a `503 not_serving` with no reason in the body. Future work, the CSR model: the machine generates its own private
   key and sends a CSR, the hub obtains the certificate with lego `ObtainForCSR` and returns only the public chain, so
   the hub never holds a machine's private key. It needs an authenticated request (the challenge nonce) and changes the
   payload, so it is a new endpoint, not a change of this one.
 - **IP lists.** Implemented in phase 3b: `GET /v1/iplist/<name>` is public data (provider ranges and manual entries),
-  so it has no host in the path, no encryption and no allow list; the payload is the one `iplist <name>` sends. Its
+  so it has no host in the path, no encryption and no allow list. Its
   `ETag` is a hash of the list's `version` (itself a hash of the entries) and its sorted warnings, so `If-None-Match`
   gives a `304` although `generated` changes at every request, and a new warning (a held update, say) gives a `200`. Signing the lists with a hub signing key whose public half is part of the signed bundle
   remains an option.
-- **SSH is optional.** A hub without `listen` in its config runs no SSH server; certificates and IP lists are still
-  issued and refreshed. The SSH commands stay as they were for hubs that keep `listen`. Removing SSH is phase 4.
+- **No SSH server.** Phase 4a removed it (v0.10.0). The config keys it used (`listen`, `hostKey`, `clients.*.sshKey`,
+  `ipLists.*.hosts`) are accepted and ignored with one warning, because hubs follow the latest release and a release
+  must read the previous one's config. A config without `https.listen` is refused. The git mirror stays: it is where
+  the bundle comes from. `status` no longer has a per-host `lastSeen`, `main` or `mainAttestation`; the host's report
+  carries `receivedAt`.
 
 ## Hub identity (a pinned key, no CA)
 
@@ -122,7 +125,7 @@ host is stored in the hub's state and appears in `infra-hub status -o json` as `
 `401 bad_nonce`, `400 bad_report`, `413 too_large`, `429 rate_limited`, `404 unknown_host`.
 
 The hub serves HTTPS (TLS 1.3 only) when `https.listen` is set, with the self-signed certificate it builds from
-`https.key`; if the key cannot be read it logs an error, serves no HTTPS and keeps serving SSH as before.
+`https.key`; if the key cannot be read the hub logs an error and exits with a failure (it has no other listener).
 
 ## Polling and kicking
 

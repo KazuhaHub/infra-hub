@@ -22,7 +22,7 @@ import (
 
 // Certificate lifecycle on the hub. The names come only from the config (rendered from the inventory);
 // nothing a client sends can add one. Each name has exactly one owner host, the only host that may
-// fetch it (`cert <name>` over the SSH server).
+// fetch it (over HTTPS, age-encrypted to that host).
 
 // NameRe: lower-case DNS names with at least two labels; no wildcards, no underscores, no path characters.
 var NameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$`)
@@ -272,7 +272,7 @@ func (m *CertManager) Run(ctx context.Context) {
 	}
 }
 
-// CertSource is what the SSH server needs: who owns a name and the bundle to serve.
+// CertSource is what the HTTPS server needs: who owns a name and the bundle to serve.
 type CertSource interface {
 	Owner(name string) (host string, ok bool)
 	Fetch(name string) (CertPayload, error)
