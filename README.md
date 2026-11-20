@@ -48,6 +48,7 @@ Commands:
 
 ```
 infra-hub serve                                   run the hub
+infra-hub check-config                            validate the config and the existing state file, start nothing
 infra-hub status [-o json] [--no-refs]            mirror, hosts, certificates, IP lists
 infra-hub iplist accept <provider>                apply a held IP list update
 infra-hub iplist history <list> [--limit N]       change history of a list (JSON)
@@ -57,6 +58,12 @@ infra-hub token (--pin <pin>... | --key <path>) --hub <url> [--hub <url>...]
                                                   print the one-line token for an agent install (no secret in it)
 infra-hub version                                 also: infra-hub --version
 ```
+
+`check-config` loads the config exactly as `serve` does (old keys accepted, removed keys warned about on stderr, all
+validation) and reads the state file if it exists (it never writes it). It does not open the identity key, the Cloudflare
+token or any certificate, and uses no network, so it works outside the service. It prints `config ok: https <listen>, N
+clients, M certs, K ip lists` and exits `0`, or prints the error on stderr and exits `1`. Run it with a newly installed
+binary before switching to it.
 
 Every flag can also come from the environment as `INFRA_HUB_<NAME>` (`--config` is `INFRA_HUB_CONFIG`, `--log-level`
 is `INFRA_HUB_LOG_LEVEL`); the config file defaults to `/etc/infra-hub/config.json`. Logs go to stderr through
