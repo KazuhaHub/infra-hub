@@ -32,7 +32,7 @@ func (c *cli) newIPList() *cobra.Command {
 		Short: "Show the change history of a list",
 		Args:  usageArgs(cobra.ExactArgs(1)),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return c.runHistory(cmd, args, false)
+			return c.runHistory(cmd, args)
 		},
 	}
 	history.Flags().Int("limit", 0, "only the newest N entries")
@@ -49,7 +49,7 @@ func (c *cli) runAccept(cmd *cobra.Command, args []string) error {
 	return iplists.AcceptReport(cfg.IPListDir, cfg.IPSources, args[0], c.stdout)
 }
 
-func (c *cli) runHistory(cmd *cobra.Command, args []string, legacy bool) error {
+func (c *cli) runHistory(cmd *cobra.Command, args []string) error {
 	cfg, err := c.loadConfig(cmd)
 	if err != nil {
 		return err
@@ -57,9 +57,6 @@ func (c *cli) runHistory(cmd *cobra.Command, args []string, legacy bool) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	if limit < 0 {
 		return usageErrorf("--limit must not be negative")
-	}
-	if legacy {
-		return iplists.HistoryReport(cfg.IPListDir, cfg.IPLists, args[0], limit, c.stdout)
 	}
 	output, _ := cmd.Flags().GetString("output")
 	if output != "json" && output != "table" {
@@ -82,33 +79,4 @@ func writeHistoryTable(w io.Writer, h report.History) error {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\t%d\t%d\n", e.Time, e.Event, e.Provider, e.CountBefore, e.CountAfter, e.AddedCount, e.RemovedCount)
 	}
 	return tw.Flush()
-}
-
-// The old command names, hidden for one release.
-
-func (c *cli) newLegacyIPListAccept() *cobra.Command {
-	return &cobra.Command{
-		Use:    "iplist-accept <provider>",
-		Hidden: true,
-		Args:   usageArgs(cobra.ExactArgs(1)),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			deprecatedCommand(c, "iplist-accept", "iplist accept")
-			return c.runAccept(cmd, args)
-		},
-	}
-}
-
-// newLegacyIPListHistory keeps the old JSON (snake_case, no apiVersion): it is what callers of the old name parse.
-func (c *cli) newLegacyIPListHistory() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:    "iplist-history <list>",
-		Hidden: true,
-		Args:   usageArgs(cobra.ExactArgs(1)),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			deprecatedCommand(c, "iplist-history", "iplist history")
-			return c.runHistory(cmd, args, true)
-		},
-	}
-	cmd.Flags().Int("limit", 0, "only the newest N entries")
-	return cmd
 }

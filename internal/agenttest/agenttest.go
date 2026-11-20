@@ -7,6 +7,7 @@ package agenttest
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
@@ -255,29 +256,40 @@ func (w *World) FailStub(fail bool) {
 // Hub is a real hub server on 127.0.0.1.
 type Hub struct {
 	URL, Pin string
-	store    *state.State
-	path     string
-	mu       sync.Mutex
-	cancel   context.CancelFunc
-	done     chan struct{}
+	// Addr is the host:port the hub listens on; StartHubKey can take it over after Stop.
+	Addr   string
+	store  *state.State
+	path   string
+	mu     sync.Mutex
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // StartHub serves the world's mirror for the world's host over TLS 1.3 with a fresh identity key.
-func (w *World) StartHub() *Hub { return w.startHub(w.MirrorRepo) }
+func (w *World) StartHub() *Hub { return w.startHub(w.MirrorRepo, nil, "127.0.0.1:0") }
+
+// StartHubKey is StartHub with the given identity key, listening on addr ("127.0.0.1:0" for any port). Giving the
+// address of a stopped hub is a hub that comes back with another key at the same URL, as in a key rotation.
+func (w *World) StartHubKey(key *ecdsa.PrivateKey, addr string) *Hub {
+	return w.startHub(w.MirrorRepo, key, addr)
+}
 
 // StartHubEmpty is a hub for the same host whose mirror holds no bundle: it answers 503 no_bundle but takes reports.
 func (w *World) StartHubEmpty() *Hub {
 	dir := filepath.Join(w.Dir, fmt.Sprintf("empty-%d", time.Now().UnixNano()))
 	must(w.T, os.MkdirAll(dir, 0o755))
 	testutil.RunGit(w.T, dir, "init", "-q", "-b", "main", ".")
-	return w.startHub(filepath.Join(dir, ".git"))
+	return w.startHub(filepath.Join(dir, ".git"), nil, "127.0.0.1:0")
 }
 
-func (w *World) startHub(mirror string) *Hub {
+func (w *World) startHub(mirror string, key *ecdsa.PrivateKey, addr string) *Hub {
 	t := w.T
 	t.Helper()
-	key, err := hubkey.Generate()
-	must(t, err)
+	var err error
+	if key == nil {
+		key, err = hubkey.Generate()
+		must(t, err)
+	}
 	pin, err := hubkey.Pin(key)
 	must(t, err)
 	cert, err := hubkey.Certificate(key, []string{"127.0.0.1"}, time.Now())
@@ -293,9 +305,10 @@ func (w *World) startHub(mirror string) *Hub {
 	srv.Now = func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * 10 * time.Second) }
 	srv.Bundles = &httpsapi.Bundles{Repo: mirror}
 	srv.Certs = w.Certs
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := net.Listen("tcp", addr)
 	must(t, err)
-	h.URL = "https://" + ln.Addr().String()
+	h.Addr = ln.Addr().String()
+	h.URL = "https://" + h.Addr
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel, h.done = cancel, make(chan struct{})
 	go func() {

@@ -10,11 +10,6 @@ import (
 	"github.com/KazuhaHub/infra-hub/internal/atomicfile"
 )
 
-// NodeRecord is one host in the legacy status document: the time of the host's latest report.
-type NodeRecord struct {
-	LastSeen time.Time `json:"last_seen"`
-}
-
 // HostReport is the latest report an agent sent; the fields are those of the API and of `status -o json`.
 type HostReport struct {
 	AppliedCommit string           `json:"appliedCommit,omitempty"` // empty: nothing applied yet

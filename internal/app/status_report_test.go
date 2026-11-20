@@ -60,11 +60,6 @@ func TestStatusShowsTheReport(t *testing.T) {
 	if strings.Contains(out, `"report"`) {
 		t.Errorf("a host without a report shows one:\n%s", out)
 	}
-	// The legacy document has no report; its last_seen is the report's receivedAt.
-	_, legacy, _ := run(t, "status", "--config", h.config, "--no-refs", "--format", "legacy")
-	if strings.Contains(legacy, "report") || strings.Contains(legacy, "feature x") || !strings.Contains(legacy, `"last_seen": "2026-11-19T08:10:02Z"`) {
-		t.Errorf("legacy status:\n%s", legacy)
-	}
 }
 
 func TestStatusShowsRejectedHubs(t *testing.T) {
