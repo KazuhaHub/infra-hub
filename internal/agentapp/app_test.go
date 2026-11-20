@@ -179,6 +179,37 @@ func TestCheckConfig(t *testing.T) {
 	}
 }
 
+func TestCheckConfigGitHubFallback(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	envFile := writeEnvFile(t, w, "verify", []string{hub.URL}, []string{hub.Pin})
+	_, out, _ := runAgent(t, nil, "check-config", "--env-file", envFile)
+	if !strings.Contains(out, "github fallback: off") {
+		t.Errorf("off:\n%s", out)
+	}
+	key, hosts := filepath.Join(w.Dir, "deploy_key"), filepath.Join(w.Dir, "github_known_hosts")
+	extra := "INFRA_AGENT_GITHUB_REPO=git@github.com:KazuhaHub/infra.git\nINFRA_AGENT_GITHUB_KEY=" + key + "\nINFRA_AGENT_GITHUB_KNOWN_HOSTS=" + hosts + "\n"
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envFile, append(data, extra...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errs := runAgent(t, nil, "check-config", "--env-file", envFile); code != 2 || !strings.Contains(errs, "GitHub deploy key") {
+		t.Errorf("missing key: exit %d: %s", code, errs)
+	}
+	for _, f := range []string{key, hosts} {
+		if err := os.WriteFile(f, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	code, out, errs := runAgent(t, nil, "check-config", "--env-file", envFile)
+	if code != 0 || !strings.Contains(out, "github fallback: on (repo git@github.com:KazuhaHub/infra.git") {
+		t.Errorf("on: exit %d\n%s\n%s", code, out, errs)
+	}
+}
+
 func TestVersion(t *testing.T) {
 	code, out, _ := runAgent(t, nil, "version")
 	if code != 0 || !strings.HasPrefix(out, "infra-agent ") {

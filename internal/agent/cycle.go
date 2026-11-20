@@ -26,7 +26,7 @@ const (
 	ResultUnchanged   = "unchanged"   // nothing new
 	ResultFailed      = "failed"      // ansible failed
 	ResultRejected    = "rejected"    // a signature, hash or format check failed
-	ResultUnreachable = "unreachable" // no hub gave a bundle
+	ResultUnreachable = "unreachable" // no hub gave a bundle (and the GitHub fallback, if set, did not either)
 )
 
 // ReapplyAfter is how long a successful apply stays current: after it the same commit is applied again (as
@@ -260,30 +260,75 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 		served = fallback
 	}
 	if served == nil {
+		var o Outcome
 		if len(rejs) > 0 {
 			var notes []string
 			for _, r := range rejs {
 				notes = append(notes, r.note())
 			}
-			return Outcome{Result: ResultRejected, Message: strings.Join(notes, "; "), Hub: rejs[0].hub.URL}, nil, rejs
+			o = Outcome{Result: ResultRejected, Message: strings.Join(notes, "; "), Hub: rejs[0].hub.URL}
+		} else {
+			o = Outcome{Result: ResultUnreachable, Message: fmt.Sprintf("no hub gave a bundle (%d of %d tried)", hubErrs, len(a.Hubs))}
 		}
-		return Outcome{Result: ResultUnreachable, Message: fmt.Sprintf("no hub gave a bundle (%d of %d tried)", hubErrs, len(a.Hubs))}, nil, rejs
+		if cfg.GitHubRepo == "" || ctx.Err() != nil {
+			return o, nil, rejs
+		}
+		return a.githubFallback(ctx, st, o), nil, rejs
 	}
 	target := ""
 	if st.Verified != nil {
 		target = st.Verified.Commit
 	}
-	o := a.decide(ctx, st, served, target, newBundle)
+	o := a.decide(ctx, st, served.URL, target, newBundle)
 	for _, r := range rejs {
 		o.Message += "; " + r.note()
 	}
 	return o, served, rejs
 }
 
+// githubFallback is what a cycle does when no hub gave a bundle (every hub unreachable, failing or rejected) and the
+// GitHub fallback is configured: it takes main-attestation straight from GitHub and runs the same checks as for a hub's
+// bundle. failed is the outcome the hubs alone gave; it stays the result when GitHub does not help.
+func (a *Agent) githubFallback(ctx context.Context, st *State, failed Outcome) Outcome {
+	slog.Warn("no hub gave a bundle, trying the GitHub fallback", "host", a.Cfg.Host, "repo", a.Cfg.GitHubRepo, "hubs", failed.Message)
+	files, err := a.fetchGitHub(ctx)
+	var be *githubBundleError
+	if errors.As(err, &be) {
+		slog.Warn("bundle from GitHub is not usable", "err", err)
+		return Outcome{Result: ResultRejected, Message: "bundle from GitHub (no hub gave one) rejected: " + be.Error() + "; " + failed.Message, Hub: GitHubSource}
+	}
+	if err != nil {
+		slog.Warn("GitHub fallback failed", "err", err)
+		failed.Message += "; GitHub fallback: " + err.Error()
+		return failed
+	}
+	_, status, err := a.acceptFiles(ctx, st, files)
+	var rj *RejectError
+	var le *localError
+	switch {
+	case errors.As(err, &rj):
+		slog.Warn("bundle from GitHub rejected", "err", err)
+		return Outcome{Result: ResultRejected, Message: "bundle from GitHub (no hub gave one) rejected: " + rj.Reason + "; " + failed.Message, Hub: GitHubSource}
+	case errors.As(err, &le):
+		return Outcome{Result: ResultFailed, Message: "cannot process the bundle from GitHub: " + le.Error(), Hub: GitHubSource}
+	case err != nil:
+		failed.Message += "; GitHub fallback: " + err.Error()
+		return failed
+	}
+	slog.Warn("using the bundle from GitHub because no hub gave one", "host", a.Cfg.Host, "status", status)
+	target := ""
+	if st.Verified != nil {
+		target = st.Verified.Commit
+	}
+	o := a.decide(ctx, st, GitHubSource, target, status == statusNew)
+	o.Message = "from GitHub, no hub gave a bundle (" + failed.Message + "): " + o.Message
+	return o
+}
+
 // decide is the second half of a cycle: with a verified bundle in hand, apply it (apply mode) or leave it (verify mode).
-func (a *Agent) decide(ctx context.Context, st *State, served *Hub, target string, newBundle bool) Outcome {
+func (a *Agent) decide(ctx context.Context, st *State, source, target string, newBundle bool) Outcome {
 	cfg := a.Cfg
-	o := Outcome{Hub: served.URL}
+	o := Outcome{Hub: source}
 	if cfg.Mode == ModeVerify {
 		if newBundle {
 			o.Result, o.Message = ResultVerified, fmt.Sprintf("verified %s; verify mode, nothing applied", short(target))
@@ -356,13 +401,19 @@ const (
 	statusOlder                     // not newer: ignored
 )
 
-// accept decrypts, verifies and extracts a bundle, applying the forward-only rule. A RejectError means a check failed,
-// a localError a fault of this machine.
+// accept decrypts a hub's answer and checks it as acceptFiles does. A RejectError means a check failed, a localError a
+// fault of this machine.
 func (a *Agent) accept(ctx context.Context, st *State, body io.Reader) (bundle.Statement, bundleStatus, error) {
 	files, err := OpenBundle(body, a.ID)
 	if err != nil {
 		return bundle.Statement{}, 0, err
 	}
+	return a.acceptFiles(ctx, st, files)
+}
+
+// acceptFiles verifies and extracts the three files of a bundle (from a hub, decrypted, or from GitHub) and applies the
+// forward-only rule. The checks are the same for both sources.
+func (a *Agent) acceptFiles(ctx context.Context, st *State, files bundle.Files) (bundle.Statement, bundleStatus, error) {
 	if err := VerifySignature(ctx, a.SSHKeygen, a.Cfg.Signers, a.Cfg.StateDir, files.Statement, files.Signature); err != nil {
 		return bundle.Statement{}, 0, local(err)
 	}

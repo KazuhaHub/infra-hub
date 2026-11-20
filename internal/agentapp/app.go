@@ -281,7 +281,7 @@ func (c *cli) newRun() *cobra.Command {
 }
 
 func startupLog(cfg agent.Config, v string) {
-	slog.Info("infra-agent started", "version", v, "host", cfg.Host, "mode", cfg.Mode, "interval", cfg.Interval.String(), "hubs", len(cfg.Token.Hubs))
+	slog.Info("infra-agent started", "version", v, "host", cfg.Host, "mode", cfg.Mode, "interval", cfg.Interval.String(), "hubs", len(cfg.Token.Hubs), "githubFallback", cfg.GitHubRepo != "")
 }
 
 // resultError is the exit status of a --once cycle.
@@ -335,7 +335,11 @@ func (c *cli) newStatus() *cobra.Command {
 			row("verified", recordText(st.Verified, "verifiedAt"))
 			row("last result", st.LastResult)
 			row("last message", st.LastMessage)
-			row("last hub", st.LastHub)
+			if st.LastHub == agent.GitHubSource {
+				row("last hub", "GitHub fallback (no hub gave a bundle)")
+			} else {
+				row("last hub", st.LastHub)
+			}
 			if st.LastCycle != nil {
 				row("last cycle", st.LastCycle.UTC().Format(time.RFC3339))
 			} else {
@@ -382,6 +386,14 @@ func (c *cli) newCheckConfig() *cobra.Command {
 			w := c.stdout
 			fmt.Fprintf(w, "host:      %s\nmode:      %s\ninterval:  %s\nstate dir: %s\nage key:   %s (recipient %s)\nsigners:   %s\npins:      %d\n",
 				cfg.Host, cfg.Mode, cfg.Interval, cfg.StateDir, cfg.AgeKey, strings.Join(id.Recipients(), ","), cfg.Signers, len(cfg.Token.Pins))
+			if cfg.GitHubRepo == "" {
+				fmt.Fprintln(w, "github fallback: off")
+			} else {
+				if err := cfg.CheckGitHubFiles(); err != nil {
+					return err
+				}
+				fmt.Fprintf(w, "github fallback: on (repo %s, key %s, known_hosts %s)\n", cfg.GitHubRepo, cfg.GitHubKey, cfg.GitHubKnownHosts)
+			}
 			healthy := 0
 			for _, u := range cfg.Token.Hubs {
 				h, err := agent.NewHub(u, cfg.Token.Pins)

@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.8.0
+
+### Added
+
+- infra-agent: GitHub fallback for hub hosts. With `INFRA_AGENT_GITHUB_REPO` (and optionally `INFRA_AGENT_GITHUB_KEY`,
+  default `/etc/infra/deploy_key`, and `INFRA_AGENT_GITHUB_KNOWN_HOSTS`, default `/etc/infra/github_known_hosts`) the
+  agent fetches `main-attestation` from GitHub when no hub gave a usable bundle, and runs the same signature, statement,
+  forward-only and extraction checks as for a hub's bundle. Hubs that answer "nothing new" do not trigger it. The result
+  names GitHub as the source and a warning is logged each time. `check-config` shows the settings and checks the files.
+  Existing agent.env files stay valid. See docs/agent.md, "GitHub fallback (hub hosts)".
+
 ## v0.7.0
 
 ### Added

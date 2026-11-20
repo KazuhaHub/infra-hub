@@ -24,6 +24,9 @@ table, or a key set twice, is an error: the agent exits with code 2 and names th
 | `INFRA_AGENT_MODE` | `verify` | `verify` or `apply` (below). |
 | `INFRA_AGENT_INTERVAL` | `5m` | Time between cycles, at least 10 s. Every wait gets a random difference of up to 10 %. |
 | `INFRA_AGENT_STATE_DIR` | `/var/lib/infra-agent` | State directory (below). |
+| `INFRA_AGENT_GITHUB_REPO` | empty (off) | Git URL of the infra repository, for the GitHub fallback (below), for example `git@github.com:KazuhaHub/infra.git`. |
+| `INFRA_AGENT_GITHUB_KEY` | `/etc/infra/deploy_key` | The deploy key for that repository. Setting it without `INFRA_AGENT_GITHUB_REPO` is an error. |
+| `INFRA_AGENT_GITHUB_KNOWN_HOSTS` | `/etc/infra/github_known_hosts` | The known_hosts file that pins GitHub's host key. Setting it without `INFRA_AGENT_GITHUB_REPO` is an error. |
 | `INFRA_AGENT_LOG_FORMAT`, `INFRA_AGENT_LOG_LEVEL` | `text`, `info` | The `--log-format` and `--log-level` flags, which can be set in the file too. |
 
 All paths must be absolute. An example:
@@ -165,6 +168,37 @@ file where a directory is needed, and the reverse), and an archive without `infr
 at 200000 entries. Files keep their permission bits without setuid, setgid and sticky, and belong to the user that runs
 the agent. Go's `os.Root` is a second guard: no file operation can leave the directory. A refused tarball is result
 `rejected`; a failure of the disk (no space, I/O error, permissions) is a fault of the host and result `failed`.
+
+## GitHub fallback (hub hosts)
+
+If a commit breaks the HTTPS of every hub, no agent can fetch the fix from a hub. A host that sets
+`INFRA_AGENT_GITHUB_REPO` can then take the bundle from GitHub itself. The fallback is turned on only on the hub hosts, which already use their key to mirror the repository from GitHub.
+
+`INFRA_AGENT_GITHUB_REPO` must be an ssh URL (`git@host:path` or `ssh://...`); the key and known_hosts paths may use only
+letters, digits, `.`, `_`, `-` and `/`, because they are passed to ssh through a shell. The fetch allows no transport but
+ssh, uses `ConnectTimeout=15` and trusts only the given known_hosts file. If a fetch fails (a killed git can leave a lock
+file behind, the repository may be damaged), the agent deletes `<state dir>/github.git` and fetches and reads once more in the same
+cycle (this also covers a damaged object at an unchanged tip). A GitHub tree that holds no usable bundle (a missing file, a file over its limit, a malformed statement) is
+`rejected`, but only when the second attempt finds the same.
+
+The fallback runs only when no hub gave a usable bundle: every hub was unreachable or failed, or every answer was
+rejected. A hub that answers "nothing new" (a `304`, the same bundle, an older one) is an answer, and GitHub is not asked.
+The agent then fetches `refs/heads/main-attestation` (depth 1, forced, no tags) into the bare repository
+`<state dir>/github.git` with the deploy key (`ssh -i`, `IdentitiesOnly`, `BatchMode`, `StrictHostKeyChecking=yes`, the
+known_hosts file above; 3 minutes at most) and reads the same three files the hubs read. Nothing else differs: the
+signature, the statement and hash, the forward-only rule, the extraction and the state are the same checks as for a
+bundle from a hub, minus the decryption (the files are plain in git).
+
+- A bundle that passes is verified, and applied in apply mode, as usual. The result's hub is `github`, the message says
+  that the bundle came from GitHub because no hub gave one, and the agent logs a warning every time it uses the fallback.
+  `status` shows it as the last hub.
+- A bundle that fails a check is `rejected`. One that is not newer than what was verified is ignored, as for a hub.
+- If the fetch fails, the result stays `unreachable` or `rejected` as the hubs left it, and the message gets
+  `; GitHub fallback: <error>` appended.
+- The report still goes to every hub, since none served the bundle.
+
+`check-config` prints the fallback settings (or `github fallback: off`) and checks that the key and the known_hosts file
+can be read.
 
 ## Verify and apply mode
 
