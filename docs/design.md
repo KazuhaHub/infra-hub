@@ -9,7 +9,9 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
 | 2 | `infra-agent` v1: challenge-response client, report sender, polling, bundle fetch, verify and apply (see [agent.md](agent.md)) | done, to be run beside infra-pull first |
 | 3a | Hub side of `GET /v1/bundle/<host>` (format in [bundle.md](bundle.md)) | done |
 | 3b | Certificates and IP lists over HTTPS: `GET /v1/cert/<host>/<name>`, `GET /v1/iplist/<name>`, `infra-agent cert`; the SSH server is optional | done (the hub side and `infra-agent cert`; an agent-side IP list fetcher and the CSR model below are open) |
-| 3 | Install script, kick, self-update, the CSR model for certificates, the IP list fetcher in the agent | open |
+| 3c | Kick: the agent long-polls `GET /v1/wait/<host>`, so a merge is applied within about a mirror interval (outward connections only) | done (v0.12.0) |
+| 3d | Install script: `GET /install` | done (v0.12.0) |
+| 3 | Self-update, the CSR model for certificates, the IP list fetcher in the agent | open |
 | 4a | SSH removed from the hub: `internal/sshserver`, the git upload-pack serving, `listen`, `hostKey`, `clients.*.sshKey` and `ipLists.*.hosts` are gone from the code and still accepted (ignored, one warning) in the config | done (v0.10.0) |
 | 4 | Hub key rotation across agents: tokens list several pins, `docs/hub-key.md` is the runbook, `TestHubKeyRotation` covers it | done |
 
@@ -91,7 +93,7 @@ Rackbook (or the owner) shows one command, in the same spirit as Beszel's agent 
 `infra-hub token`:
 
 ```
-curl -fsSL -k --pinnedpubkey 'sha256//<hub pin>' https://<hub address>:<port>/install | sudo sh -s -- <token>
+curl -fsSL -k --pinnedpubkey 'sha256//<hub pin>' https://<hub address>:<port>/install | sudo sh -s -- <token> <host> [--hub]
 ```
 
 1. curl only talks to a hub whose key matches the pin (the one in the token; `-k` only switches off the certificate
@@ -99,6 +101,8 @@ curl -fsSL -k --pinnedpubkey 'sha256//<hub pin>' https://<hub address>:<port>/in
    authentic. There is no CA pin any more.
 2. The script downloads `infra-agent` from the hub (the hub serves the release it verified with Sigstore), writes
    `agent.env` (hub URLs and pins from the token, `AGENT_HUB_PINS`), and creates the age key.
+   (Implemented in v0.12.0 differently from this sketch: the hub serves the script, the script downloads the binary from
+   the GitHub release and checks it against `SHA256SUMS`; see [agent.md](agent.md).)
 3. It prints the age public key. Registering the machine is a reviewed change in the private infra repository (Rackbook
    opens it); once merged, the agent starts receiving bundles.
 
@@ -131,9 +135,12 @@ The hub serves HTTPS (TLS 1.3 only) when `https.listen` is set, with the self-si
 
 - The agent polls every 5 minutes by default (configurable). The hub answers `304 Not Modified` when nothing changed,
   so an idle poll costs about 1 KB with TLS session resumption.
-- The hub can "kick" an agent to make it check now. The agent listens on a small port bound to a configured private
-  address and accepts only a no-authority "check now" request with rate limiting. The request carries no data and
-  grants no capability: at worst it causes an early poll.
+- The hub does not push anything to an agent (an agent opens no port). Instead, between cycles the agent holds a long
+  request, `GET /v1/wait/<host>?etag=<last verified commit>`, to the first hub that supports it. The hub answers at once
+  when the bundle it would serve differs, otherwise when its mirror sees a new `main-attestation` tip that changes it, or
+  after about 4 minutes with "no change". The answer carries only whether and which commit; the bundle is still fetched,
+  verified and applied as always. The poll interval stays the upper bound, and a hub without the endpoint (404) is just
+  not asked for an hour. Details in [agent.md](agent.md).
 
 ## Alert mail
 

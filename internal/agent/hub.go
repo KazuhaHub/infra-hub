@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"filippo.io/age"
@@ -36,6 +37,11 @@ var responseLimit int64 = MaxResponse
 type Hub struct {
 	URL    string
 	client *http.Client
+	// waitClient is for GET /v1/wait (kick.go): the same trust, but a request may be held for minutes.
+	waitClient *http.Client
+
+	kickMu      sync.Mutex
+	noKickUntil time.Time // set when the hub has no /v1/wait (an older hub)
 }
 
 // NewHub builds the client of one hub: TLS 1.3, the pins decide trust, no proxy, no redirects.
@@ -52,11 +58,13 @@ func NewHub(rawURL string, pins []string) (*Hub, error) {
 		ResponseHeaderTimeout: HTTPTimeout,
 		ForceAttemptHTTP2:     true,
 	}
-	return &Hub{URL: rawURL, client: &http.Client{
-		Transport:     tr,
-		Timeout:       HTTPTimeout,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}}, nil
+	wtr := tr.Clone()
+	wtr.ResponseHeaderTimeout = WaitClientTimeout
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &Hub{URL: rawURL,
+		client:     &http.Client{Transport: tr, Timeout: HTTPTimeout, CheckRedirect: noRedirect},
+		waitClient: &http.Client{Transport: wtr, Timeout: WaitClientTimeout, CheckRedirect: noRedirect},
+	}, nil
 }
 
 // HubError is an answer that is not the one that was asked for: the status and the hub's error code.

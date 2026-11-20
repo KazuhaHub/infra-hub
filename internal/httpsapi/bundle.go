@@ -36,6 +36,9 @@ type Bundles struct {
 	mu     sync.Mutex // also serializes git reads: the tip is read under it, so no request works from an older tip
 	cur    *tipState
 	builds int // archives built (tests)
+
+	wmu  sync.Mutex // guards wake
+	wake chan struct{}
 }
 
 type tipState struct {
@@ -61,14 +64,13 @@ func (b *Bundles) cachedEncrypted() int {
 	return len(b.cur.enc)
 }
 
-// serve returns the commit of the current bundle and, unless ifNoneMatch names it, the ciphertext for host.
-func (b *Bundles) serve(ctx context.Context, host string, rcpt age.Recipient, ifNoneMatch string) (commit string, body []byte, notModified bool, err error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// tipLocked reads the tip of main-attestation and makes sure the cache describes it, with its statement parsed. The
+// caller holds b.mu.
+func (b *Bundles) tipLocked(ctx context.Context) (*tipState, error) {
 	tip, err := bundle.Tip(ctx, b.Repo)
 	if err != nil {
 		b.cur = nil
-		return "", nil, false, err
+		return nil, err
 	}
 	if b.cur == nil || b.cur.tip != tip {
 		b.cur = &tipState{tip: tip, enc: map[string][]byte{}}
@@ -77,10 +79,53 @@ func (b *Bundles) serve(ctx context.Context, host string, rcpt age.Recipient, if
 	if c.stmt == nil {
 		st, err := bundle.Inspect(ctx, b.Repo, tip, b.limits())
 		if err != nil {
-			return "", nil, false, err
+			return nil, err
 		}
 		c.stmt = &st
 	}
+	return c, nil
+}
+
+// Commit returns the commit of the bundle the hub would serve now (the ETag without the quotes).
+func (b *Bundles) Commit(ctx context.Context) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c, err := b.tipLocked(ctx)
+	if err != nil {
+		return "", err
+	}
+	return c.stmt.Commit, nil
+}
+
+// Poke wakes everything that waits for the bundle to change; the mirror calls it after every successful fetch.
+func (b *Bundles) Poke() {
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
+	if b.wake != nil {
+		close(b.wake)
+	}
+	b.wake = nil
+}
+
+// wakeChan returns a channel that is closed by the next Poke.
+func (b *Bundles) wakeChan() <-chan struct{} {
+	b.wmu.Lock()
+	defer b.wmu.Unlock()
+	if b.wake == nil {
+		b.wake = make(chan struct{})
+	}
+	return b.wake
+}
+
+// serve returns the commit of the current bundle and, unless ifNoneMatch names it, the ciphertext for host.
+func (b *Bundles) serve(ctx context.Context, host string, rcpt age.Recipient, ifNoneMatch string) (commit string, body []byte, notModified bool, err error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	c, err := b.tipLocked(ctx)
+	if err != nil {
+		return "", nil, false, err
+	}
+	tip := c.tip
 	commit = c.stmt.Commit
 	if ifNoneMatch != "" && etagMatches(ifNoneMatch, etagOf(commit)) {
 		return commit, nil, true, nil

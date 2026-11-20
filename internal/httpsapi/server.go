@@ -31,7 +31,7 @@ type ReportStore interface {
 	Flush() error
 }
 
-// Server answers /v1/healthz, /v1/challenge, /v1/report, /v1/bundle, /v1/cert and /v1/iplist.
+// Server answers /v1/healthz, /v1/challenge, /v1/report, /v1/bundle, /v1/wait, /v1/cert, /v1/iplist and /install.
 type Server struct {
 	// Recipients maps a host name to its registered age public key; only these hosts get a challenge.
 	Recipients map[string]age.Recipient
@@ -44,9 +44,13 @@ type Server struct {
 	Certs certs.CertSource
 	// IPLists serves /v1/iplist/<name>; nil means no lists.
 	IPLists IPListProvider
+	// WaitTimeout is how long GET /v1/wait/<host> holds a request (default DefaultWaitTimeout); WaitRecheck is how often
+	// a held request looks at the bundle by itself (default DefaultWaitRecheck).
+	WaitTimeout, WaitRecheck time.Duration
 
-	nonces                                                      *nonceStore
-	challengeHost, challengeIP, repIP, bundleIP, certIP, listIP *limiter
+	nonces                                                                         *nonceStore
+	challengeHost, challengeIP, repIP, bundleIP, certIP, listIP, waitIP, installIP *limiter
+	waits                                                                          waiters
 }
 
 // NewServer returns a server with the default rate limits: a challenge is limited per host (60 a minute, burst 20) and
@@ -55,7 +59,8 @@ type Server struct {
 func NewServer(recipients map[string]age.Recipient, reports ReportStore) *Server {
 	return &Server{Recipients: recipients, Reports: reports, Now: time.Now, Rand: rand.Reader, nonces: newNonceStore(),
 		challengeHost: newLimiter(60, 20, 4096), challengeIP: newLimiter(12, 10, 16384), repIP: newLimiter(60, 20, 16384),
-		bundleIP: newLimiter(30, 20, 16384), certIP: newLimiter(30, 10, 16384), listIP: newLimiter(60, 20, 16384)}
+		bundleIP: newLimiter(30, 20, 16384), certIP: newLimiter(30, 10, 16384), listIP: newLimiter(60, 20, 16384),
+		waitIP: newLimiter(12, 10, 16384), installIP: newLimiter(30, 10, 16384)}
 }
 
 type errorBody struct {
@@ -98,6 +103,10 @@ func (s *Server) Handler() http.Handler {
 			s.bundle(w, r, host)
 			return
 		}
+		if host, ok := strings.CutPrefix(r.URL.Path, "/v1/wait/"); ok && host != "" {
+			s.wait(w, r, host)
+			return
+		}
 		if rest, ok := strings.CutPrefix(r.URL.Path, "/v1/cert/"); ok {
 			if r.Method != http.MethodGet {
 				w.Header().Set("Allow", "GET")
@@ -122,6 +131,9 @@ func (s *Server) Handler() http.Handler {
 			return
 		}
 		switch r.URL.Path {
+		case "/install":
+			s.install(w, r)
+			return
 		case "/v1/healthz":
 			method, h = http.MethodGet, s.healthz
 		case "/v1/challenge":
@@ -287,7 +299,9 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener, conf *tls.Config) e
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    16 << 10,
-		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),
+		// Held requests (/v1/wait) end when the hub is stopped.
+		BaseContext: func(net.Listener) context.Context { return ctx },
+		ErrorLog:    slog.NewLogLogger(slog.Default().Handler(), slog.LevelDebug),
 	}
 	done := make(chan struct{})
 	go func() {

@@ -35,6 +35,9 @@ type Config struct {
 	// MaxStaleSeconds: the hub refuses to serve when its last successful fetch from upstream is older than this, or
 	// when it has had none since it started (default 600). Clients then use their next source.
 	MaxStaleSeconds int `json:"maxStaleSeconds"`
+	// WaitTimeoutSeconds is how long GET /v1/wait/<host> holds a request before it answers "no change" (default 240,
+	// 10 to 300; keep it below the idle timeout of anything between the agents and the hub).
+	WaitTimeoutSeconds int `json:"waitTimeoutSeconds"`
 	// Clients maps a host name to the age public key it answers challenges with. An entry may still carry an
 	// "sshKey" (or be the SSH key as a string, as in the oldest configs): it is ignored.
 	Clients map[string]Client `json:"clients"`
@@ -273,6 +276,12 @@ func ParseConfig(data []byte) (Config, error) {
 	}
 	if c.MaxStaleSeconds < 2*c.MirrorIntervalSeconds {
 		return Config{}, errors.New("config: maxStaleSeconds must be at least twice mirrorIntervalSeconds")
+	}
+	if c.WaitTimeoutSeconds == 0 {
+		c.WaitTimeoutSeconds = 240
+	}
+	if c.WaitTimeoutSeconds < 10 || c.WaitTimeoutSeconds > 300 {
+		return Config{}, errors.New("config: waitTimeoutSeconds must be between 10 and 300")
 	}
 	if !filepath.IsAbs(c.Repo) || filepath.Base(c.Repo) != repoName {
 		return Config{}, fmt.Errorf("config: repo must be an absolute path ending in /%s", repoName)

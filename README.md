@@ -8,7 +8,7 @@ One repository holds both programs and they are released together under one vers
 | Program | What it is | Status |
 | --- | --- | --- |
 | `cmd/infra-hub` | The server. Mirrors the configuration repository, issues certificates, collects IP lists, receives reports. | Works. Serves its agents over HTTPS only: bundle, certificates, IP lists, challenge and report. The SSH server was removed in v0.10.0. |
-| `cmd/infra-agent` | The per-machine agent. Fetches the signed config bundle, verifies it, applies it with ansible, reports back. | v1 works ([docs/agent.md](docs/agent.md)); no install script and no self-update yet. Run it in verify mode beside infra-pull first. |
+| `cmd/infra-agent` | The per-machine agent. Fetches the signed config bundle, verifies it, applies it with ansible, reports back. | v1 works ([docs/agent.md](docs/agent.md)), with the install script (`GET /install`) and the kick; no self-update yet. Run it in verify mode beside infra-pull first. |
 
 The design (no SSH, age keys, challenge-response, signed bundles) is written down in
 [docs/design.md](docs/design.md). Logging, CLI and JSON conventions shared with Rackbook are in [docs/conventions.md](docs/conventions.md). The hub side (phase 1, 3a) and the agent's bundle path (phase 2) are done.
@@ -78,7 +78,7 @@ lower camelCase keys, RFC 3339 UTC times, durations as `...Seconds`, hosts, cert
 sorted by name.
 
 - **HTTPS for agents.** `https.listen` is required (it is the hub's only listener). The hub serves `GET /v1/healthz`, `POST /v1/challenge`,
-  `POST /v1/report`, `GET /v1/bundle/<host>` (the age-encrypted config bundle, format in
+  `POST /v1/report`, `GET /v1/wait/<host>` (long poll: answers when the bundle changed), `GET /install` (the agent install script), `GET /v1/bundle/<host>` (the age-encrypted config bundle, format in
   [docs/bundle.md](docs/bundle.md)), `GET /v1/cert/<host>/<name>` (the owner's certificate and key, age-encrypted to the
   host) and `GET /v1/iplist/<name>` (public JSON, `ETag`/`304`; `HEAD` works) over TLS 1.3, using a self-signed certificate built from the hub identity key, which agents pin
   (see [docs/hub-key.md](docs/hub-key.md)). A host proves it holds its age key by decrypting a single-use nonce; its
@@ -117,7 +117,7 @@ convenient. A config without `https.listen` is refused: there is no other listen
 
 ### Config keys are camelCase (migration)
 
-Every config key is lower camelCase, like the rest of the JSON this project writes (`mirrorIntervalSeconds`, `maxStaleSeconds`, `certDir`, `acmeDirectory`, `acmeEmail`, `cloudflareTokenFile`,
+Every config key is lower camelCase, like the rest of the JSON this project writes (`mirrorIntervalSeconds`, `maxStaleSeconds`, `waitTimeoutSeconds`, `certDir`, `acmeDirectory`, `acmeEmail`, `cloudflareTokenFile`,
 `ipSources` (with `maxBytes` inside a source), `ipLists`, `ipListDir`). The earlier snake_case spellings (`mirror_interval_seconds`, `max_stale_seconds`, `cert_dir`, `acme_directory`, `acme_email`, `cloudflare_token_file`,
 `ip_sources` with `max_bytes`, `ip_lists`, `iplist_dir`) still work for one release: the hub logs a warning that names
 the new key and starts. A config that sets both spellings of one key is rejected. To migrate, rename the keys; nothing

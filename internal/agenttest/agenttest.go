@@ -256,6 +256,8 @@ func (w *World) FailStub(fail bool) {
 // Hub is a real hub server on 127.0.0.1.
 type Hub struct {
 	URL, Pin string
+	// Bundles is the hub's bundle source; Poke() on it is what the mirror does after a fetch (it wakes /v1/wait).
+	Bundles *httpsapi.Bundles
 	// Addr is the host:port the hub listens on; StartHubKey can take it over after Stop.
 	Addr   string
 	store  *state.State
@@ -303,7 +305,8 @@ func (w *World) startHub(mirror string, key *ecdsa.PrivateKey, addr string) *Hub
 	var ticks atomic.Int64
 	base := time.Now()
 	srv.Now = func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * 10 * time.Second) }
-	srv.Bundles = &httpsapi.Bundles{Repo: mirror}
+	h.Bundles = &httpsapi.Bundles{Repo: mirror}
+	srv.Bundles = h.Bundles
 	srv.Certs = w.Certs
 	ln, err := net.Listen("tcp", addr)
 	must(t, err)

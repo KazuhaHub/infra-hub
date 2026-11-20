@@ -1,6 +1,23 @@
 # Changelog
 
-## v0.12.0 (unreleased)
+## v0.12.0
+
+### Added
+
+- Kick: `GET /v1/wait/<host>?etag=<commit>` holds the request until the bundle the hub would serve to that host differs
+  from `etag` (answers at once if it already does) or `waitTimeoutSeconds` (new config key, default 240, 10 to 300) is
+  over: `{"changed":true,"commit":...}` or `{"changed":false}`, no secret. The mirror wakes the held requests after each
+  fetch. At most 2 held requests per host and 256 in all, 12 requests a minute per peer; a held request ends when the
+  client leaves or the hub stops (the server's own read and write timeouts are moved for it).
+- `infra-agent run` waits between cycles on that endpoint of the first hub that has it and starts a cycle as soon as the
+  bundle changes (at least 10 s after the previous cycle ended; a kick for the commit whose apply just failed waits for the interval). The interval stays the upper bound; a hub that answers
+  404 is not asked for an hour; errors back off with jitter; after a kick for a bundle that could not be verified the
+  next wait starts from that commit, so there is no loop. Nothing changes against an older hub.
+- `GET /install`: a POSIX sh install script (built into the binary, no secret): `curl -fsSk --pinnedpubkey <pin>
+  https://<hub>:11883/install | sudo sh -s -- <ih1 token> <host> [--hub] [--force]` installs the missing prerequisites on
+  Debian/Ubuntu, creates `/etc/infra` and the age key (prints the public key), writes `agent.env`, installs the latest
+  release of `infra-agent` (checked against `SHA256SUMS`) and its systemd unit without starting it, and prints the next
+  steps. `--hub` also creates the deploy key. Details in [docs/agent.md](docs/agent.md).
 
 ### Removed
 
@@ -25,6 +42,11 @@
 
 - `docs/hub-key.md`: the rotation as an exact runbook (where the pins and the hub key live in the infra repository);
   `docs/design.md` phase 4 (hub key rotation) is done.
+
+### Fixed
+
+- The message of a cycle that fell back to GitHub no longer repeats the reason: `from GitHub, no hub gave a bundle (1 of 1
+  tried): ...` instead of `... no hub gave a bundle (no hub gave a bundle (1 of 1 tried)): ...`.
 
 ## v0.11.0
 
