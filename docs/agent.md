@@ -5,8 +5,8 @@ the hubs over HTTPS, verifies it, applies it with ansible and reports the result
 port. The design follows Beszel: one env file, one token line. The bundle format is in [bundle.md](bundle.md), the hub
 identity key and the pin in [hub-key.md](hub-key.md), the overall design in [design.md](design.md).
 
-This is v1: it covers the bundle path (fetch, verify, extract, apply, report). There is no install script and no
-self-update yet (see "Next steps"); certificates, IP lists and the kick port are not part of it.
+This is v1: it covers the bundle path (fetch, verify, extract, apply, report), the install script and the kick (below).
+There is no self-update yet (see "Next steps"); IP lists are not part of it.
 
 ## Configuration
 
@@ -57,7 +57,7 @@ keys and RFC 3339 UTC times.
 
 ## One cycle
 
-Before the first cycle, `run` (not `--once`) waits a random delay of up to the interval or 60 s, whichever is shorter, so
+Between cycles `run` waits for the interval or for a kick (next section). Before the first cycle, `run` (not `--once`) waits a random delay of up to the interval or 60 s, whichever is shorter, so
 that a fleet that starts together does not call the hubs together.
 
 1. **Fetch.** `GET /v1/bundle/<host>` from each hub in order until one gives a usable answer, over TLS 1.3 with the pinned
@@ -170,6 +170,80 @@ file where a directory is needed, and the reverse), and an archive without `infr
 at 200000 entries. Files keep their permission bits without setuid, setgid and sticky, and belong to the user that runs
 the agent. Go's `os.Root` is a second guard: no file operation can leave the directory. A refused tarball is result
 `rejected`; a failure of the disk (no space, I/O error, permissions) is a fault of the host and result `failed`.
+
+## Kick: applying a merge within about a mirror interval
+
+The agent opens no port, so the hub cannot push. Instead the agent asks, and the hub answers late. Between two cycles
+`run` sends `GET /v1/wait/<host>?etag=<commit>` to the first hub of the token that supports it, with the last verified
+commit (empty when there is none). The hub:
+
+- answers at once `200 {"apiVersion":"v1","changed":true,"commit":"<commit>"}` when the bundle it would serve now is not
+  `etag`;
+- otherwise holds the request until its mirror brings a `main-attestation` tip that changes the bundle (the mirror
+  fetches every `mirrorIntervalSeconds`, 60 by default), then answers as above; or, after `waitTimeoutSeconds` (240 by
+  default, 10 to 300), `200 {"apiVersion":"v1","changed":false}`.
+
+The answer holds no secret: the commit is what the `ETag` of `/v1/bundle/<host>` shows anyway. On `changed` the agent
+starts a cycle at once (at least 10 s after the previous cycle began), which fetches, verifies and applies as always: a
+kick decides only *when*, never *what*. So a wrong or hostile answer can cause at most an early poll.
+
+- **The interval stays the upper bound.** The wait never extends the time between cycles: when the interval (plus or
+  minus 10 %) is over, the cycle runs whether or not a hub answered.
+- **Older hubs.** A hub that answers 404 (no `/v1/wait`) is not asked again for an hour; if no hub supports it the agent
+  just sleeps, as before.
+- **Errors** (a refused connection, 429, 5xx, a malformed answer) are logged and followed by a jittered back-off (15 s,
+  doubling up to 5 minutes) inside the interval. An answer of "no change" is followed by a pause of at least 10 s. The
+  agent never repeats a request without a pause.
+- **No loop on a bundle that cannot be verified.** After a kick that named commit X, the next wait asks "anything newer
+  than X" even if the cycle could not verify X (rejected, failed), so one bad bundle is one early cycle, not a series.
+- **Limits on the hub.** At most 2 held requests per host and 256 in all (429 `too_many_waiters`), 12 requests a minute
+  per peer address (burst 10), a 503 like `/v1/bundle` when the mirror is stale, 404 `unknown_host` for a host that is
+  not registered. A held request ends when the client disconnects or the hub stops. A hold is shorter than the 5 minute
+  idle timeout of common proxies and NAT tables; the agent gives up on a request after 5.5 minutes.
+
+## Installing an agent (`GET /install`)
+
+A host that is already on the tailnet is installed with one command (the pin and the address are those of the hub; the
+token is the `ih1.` line of `infra-hub token`):
+
+```
+curl -fsSk --pinnedpubkey 'sha256//<pin>' https://<hub>:11883/install | sudo sh -s -- <ih1 token> <inventory-host-name> [--hub] [--force]
+```
+
+The hub serves a POSIX `sh` script (`text/plain`, built into the binary, no secret in it; the pin is what makes it
+authentic, `-k` only drops the chain check that a self-signed certificate cannot pass). The script, as root, on Debian or
+Ubuntu (apt) with x86_64 or aarch64:
+
+1. installs only what is missing: `ansible-core`, `git`, `openssh-client`, `age`, `curl`, `openssl`, `ca-certificates` by
+   apt (the same set as the infra repository's `infra_agent` role), and `sops` from its GitHub release (version 3.13.3,
+   keep it in step with infra's `sops_version`), checked against the `sops-v3.13.3.checksums.txt` of that release;
+2. creates `/etc/infra` (0700) and, if missing, `/etc/infra/age.key` (`age-keygen`), and prints the age **public** key;
+3. writes `/etc/infra/agent.env` (0600) with the token, the host name and `INFRA_AGENT_MODE=apply`;
+4. resolves the latest `infra-hub` release (the redirect of `releases/latest`, the tag must be `vX.Y.Z`), downloads
+   `infra-agent-linux-<arch>`, checks it against the release's `SHA256SUMS`, runs `version` on it, installs it as
+   `/usr/local/lib/infra-agent/<tag>/infra-agent` and moves the stable symlink `/usr/local/lib/infra-agent/infra-agent`;
+5. writes `/etc/systemd/system/infra-agent.service` (the text of [infra-agent.service](infra-agent.service), with
+   `ExecStart` at the stable symlink) and does **not** start it;
+6. prints the next steps: register the host in the infra repository with the printed age public key and merge; copy
+   `allowed_signers` from the infra repository to `/etc/infra/allowed_signers`; then `infra-agent check-config` and
+   `systemctl enable --now infra-agent`.
+
+`allowed_signers` is not fetched from the hub: the bundle is verified with it, so it has to come from the administrator,
+not from the thing whose bundle it checks. A fresh host has no applied record, so the first bundle it accepts is any
+validly signed one, however old (the guard that infra's `bootstrap-host.sh` offers, `INFRA_FLOOR`, is not part of this
+script).
+
+`--hub` is for hub hosts: it also creates `/etc/infra/deploy_key` (ed25519, no passphrase), prints its public key (add it
+as a read-only deploy key of the infra repository on GitHub), writes `/etc/infra/github_known_hosts` with GitHub's
+published ed25519 host key (the same constant as `bootstrap-host.sh`), and adds `INFRA_AGENT_GITHUB_REPO` to
+`agent.env`.
+
+It can be run again. An existing `age.key` is kept; an existing `agent.env` that differs from what the run would write
+stops the run, and an existing unit that differs is left alone, unless `--force` is given, which keeps the old file as
+`<file>.bak-<time>` and writes the new one (`--force` also replaces the age key, which then needs a new registration).
+Everything that could refuse is checked before anything is changed. The script is one function called on its last line,
+and every command that might read standard input gets `/dev/null`, so nothing can swallow the rest of a script that is
+piped in.
 
 ## GitHub fallback (hub hosts)
 
@@ -289,7 +363,5 @@ The example unit is [infra-agent.service](infra-agent.service).
 
 ## Next steps
 
-- An install script (`curl ... | sudo sh -s -- <token>`, see design.md) that writes `agent.env` and creates the age key.
-  There is none yet: the files are placed by hand.
 - Self-update from the signed releases, with fallback to the previous version.
-- IP lists in the agent (the hub serves them at `GET /v1/iplist/<name>`), the CSR model for certificates, the kick port, alert mail (design.md, phase 3).
+- IP lists in the agent (the hub serves them at `GET /v1/iplist/<name>`), the CSR model for certificates, alert mail (design.md, phase 3).
