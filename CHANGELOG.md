@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.9.0 (unreleased)
+
+### Added
+
+- `GET /v1/iplist/<name>` (and `HEAD`) on the HTTPS listener: the same JSON object `iplist <name>` sends over SSH (`name`,
+  `version`, `generated`, `cidrs`, `warnings`), as one line. The lists are public data: no host in the path, no
+  encryption, no allow list, and `ipLists.*.hosts` is ignored here. `ETag` is the sha256 of the body, `If-None-Match`
+  answers `304`. Errors: `404 not_found` (unknown list or a name that is not `[a-z0-9_-]{1,64}`), `503 not_serving`
+  (the list cannot be built: a provider never delivered or its state is unreadable), `429 rate_limited` (per peer
+  address, 60 a minute, burst 20), `405` for other methods.
+- `GET /v1/cert/<host>/<name>`: the JSON line `cert <name>` sends over SSH (`name`, `fullchain`, `privkey`, `not_after`),
+  age-encrypted (binary) to the host's `agePublicKey`, `Cache-Control: no-store`. Served only when the config says the
+  host owns the name and the host has an age key; every other case (unknown host, unknown name, not the owner, no age
+  key) is the same `404 not_found`. `503 not_serving` with a generic message when the certificate is missing or has
+  less than 7 days left (the reason is in the hub log). `429` per peer address, 30 a minute, burst 10. The hub logs
+  `cert served` and `iplist served`.
+- `GET /v1/healthz` also reports the hub's `version`.
+- `infra-agent cert <name> [--hub URL] [--out-dir DIR]`: fetches the certificate from the hubs of the token over the
+  pinned connection, decrypts it with the host's age key and checks it. Without `--out-dir` it prints the first
+  decrypted answer; with it, `<i>.json` or `<i>.err` per hub is written safely into the directory (0600, owned by the
+  directory's owner, nothing followed through a symlink). See docs/agent.md.
+
+### Changed
+
+- The SSH server is optional. Without `listen` in the config no SSH listener starts, and `hostKey` and the clients'
+  `sshKey` are not needed (a client may have only an `agePublicKey`; `clients` may even be empty). Certificates and IP
+  lists are managed either way. A config with `listen` loads exactly as before (it still needs `hostKey` and at least
+  one client). With SSH on, `ipLists.*.hosts` keeps its meaning for the SSH path; a list without `hosts` is served to no
+  host over SSH.
 ## v0.8.0
 
 ### Added

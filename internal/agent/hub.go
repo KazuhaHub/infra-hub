@@ -262,3 +262,52 @@ func (h *Hub) Report(ctx context.Context, host string, id *Identity, rep ReportB
 }
 
 var jsonHdr = map[string]string{"Content-Type": "application/json"}
+
+// Limits of a certificate answer: the JSON line (chain and key) is far below 1 MiB; age adds a few hundred bytes.
+const (
+	maxCertPlain    = 1 << 20
+	maxCertResponse = maxCertPlain + 4<<10
+)
+
+// CertReply is the plaintext of GET /v1/cert/<host>/<name>: the same object `cert <name>` printed over SSH.
+type CertReply struct {
+	Name      string `json:"name"`
+	Fullchain string `json:"fullchain"`
+	Privkey   string `json:"privkey"`
+	NotAfter  string `json:"not_after"`
+}
+
+// Cert fetches the certificate called name for host and decrypts it with id. It returns the decrypted reply exactly as
+// the hub sent it (one JSON line), after checking that it is an object with the four string fields and that it is the
+// certificate that was asked for.
+func (h *Hub) Cert(ctx context.Context, host, name string, id *Identity) ([]byte, error) {
+	_, _, data, err := h.do(ctx, http.MethodGet, "/v1/cert/"+url.PathEscape(host)+"/"+url.PathEscape(name), nil, nil, maxCertResponse, http.StatusOK)
+	if err != nil {
+		return nil, err
+	}
+	r, err := age.Decrypt(bytes.NewReader(data), id.ids...)
+	if err != nil {
+		return nil, errors.New("cannot decrypt the answer with this host's age key")
+	}
+	plain, err := io.ReadAll(io.LimitReader(r, maxCertPlain+1))
+	if err != nil {
+		return nil, errors.New("cannot decrypt the answer with this host's age key")
+	}
+	if len(plain) > maxCertPlain {
+		return nil, fmt.Errorf("the decrypted answer is larger than %d bytes", maxCertPlain)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(plain, &obj); err != nil || obj == nil {
+		return nil, errors.New("the decrypted answer is not a JSON object")
+	}
+	for _, k := range []string{"name", "fullchain", "privkey", "not_after"} {
+		var v string
+		if json.Unmarshal(obj[k], &v) != nil || v == "" {
+			return nil, fmt.Errorf("the decrypted answer has no string field %q", k)
+		}
+		if k == "name" && v != name {
+			return nil, errors.New("the decrypted answer is for another certificate")
+		}
+	}
+	return plain, nil
+}

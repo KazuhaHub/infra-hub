@@ -8,7 +8,8 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
 | 1 | Hub side: hub identity key and token, HTTPS, `/v1/healthz`, `/v1/challenge`, `/v1/report`, reports in `status` | done |
 | 2 | `infra-agent` v1: challenge-response client, report sender, polling, bundle fetch, verify and apply (see [agent.md](agent.md)) | done, to be run beside infra-pull first |
 | 3a | Hub side of `GET /v1/bundle/<host>` (format in [bundle.md](bundle.md)) | done |
-| 3 | Agent side of certificates and IP lists over HTTPS, install script, kick, self-update (the agent side of the bundle is in phase 2) | open |
+| 3b | Certificates and IP lists over HTTPS: `GET /v1/cert/<host>/<name>`, `GET /v1/iplist/<name>`, `infra-agent cert`; the SSH server is optional | done (the hub side and `infra-agent cert`; an agent-side IP list fetcher and the CSR model below are open) |
+| 3 | Install script, kick, self-update, the CSR model for certificates, the IP list fetcher in the agent | open |
 | 4 | Hub key rotation across agents, SSH removed | open |
 
 ## Goals
@@ -35,9 +36,21 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
   `bundle.sig` and `bundle.tar.gz` from the tip of `main-attestation` in the mirror, takes the commit from the
   strictly parsed statement (it verifies neither signature nor hash: the hub is not trusted for integrity), and
   answers an age-encrypted ustar of the three files with `ETag` and `304`, or `503 no_bundle` / `503 stale_mirror`.
-- **Certificates.** The machine generates its own private key and sends a CSR. The hub obtains the certificate with
-  lego `ObtainForCSR` and returns only the public certificate chain. The hub never holds a machine's private key.
-- **IP lists.** Signed by a hub signing key whose public half is part of the signed bundle.
+- **Certificates.** Implemented in phase 3b: the hub obtains the certificate and holds its private key, as it does for
+  the SSH path, and `GET /v1/cert/<host>/<name>` returns the same JSON line as `cert <name>` (name, fullchain, privkey,
+  not_after), age-encrypted to the owner's `agePublicKey`. Unknown host, unknown name, a name owned by another host and a
+  host without an age key all answer the same `404 not_found`; a missing certificate or one with less than 7 days left
+  is a `503 not_serving` with no reason in the body. Future work, the CSR model: the machine generates its own private
+  key and sends a CSR, the hub obtains the certificate with lego `ObtainForCSR` and returns only the public chain, so
+  the hub never holds a machine's private key. It needs an authenticated request (the challenge nonce) and changes the
+  payload, so it is a new endpoint, not a change of this one.
+- **IP lists.** Implemented in phase 3b: `GET /v1/iplist/<name>` is public data (provider ranges and manual entries),
+  so it has no host in the path, no encryption and no allow list; the payload is the one `iplist <name>` sends. Its
+  `ETag` is the sha256 of the body, and the body carries `generated`, so a validator only matches while the hub keeps
+  serving the same rendering. Signing the lists with a hub signing key whose public half is part of the signed bundle
+  remains an option.
+- **SSH is optional.** A hub without `listen` in its config runs no SSH server; certificates and IP lists are still
+  issued and refreshed. The SSH commands stay as they were for hubs that keep `listen`. Removing SSH is phase 4.
 
 ## Hub identity (a pinned key, no CA)
 

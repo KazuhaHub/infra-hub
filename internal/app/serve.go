@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/config"
@@ -47,9 +48,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 	if err != nil {
 		return err
 	}
-	signer, err := sshserver.LoadOrCreateHostKey(cfg.HostKey)
-	if err != nil {
-		return err
+	var signer ssh.Signer
+	if cfg.SSHEnabled() {
+		if signer, err = sshserver.LoadOrCreateHostKey(cfg.HostKey); err != nil {
+			return err
+		}
 	}
 	slog.Info("starting", "version", version.Version)
 	st, err := state.LoadState(cfg.State)
@@ -80,9 +83,11 @@ func serve(ctx context.Context, cfg config.Config) error {
 		}
 	}()
 
-	ln, err := net.Listen("tcp", cfg.Listen)
-	if err != nil {
-		return err
+	var ln net.Listener
+	if cfg.SSHEnabled() {
+		if ln, err = net.Listen("tcp", cfg.Listen); err != nil {
+			return err
+		}
 	}
 	var certMgr *certs.CertManager
 	issuing := false
@@ -113,18 +118,25 @@ func serve(ctx context.Context, cfg config.Config) error {
 		go ipm.Run(ctx) // refreshes the providers and applies accepted changes
 	}
 
-	slog.Info("listening", "addr", ln.Addr().String(), "hostKey", sshserver.SignerFingerprint(signer.PublicKey()), "clients", len(keys))
+	var srv *sshserver.Server
+	if cfg.SSHEnabled() {
+		slog.Info("listening", "addr", ln.Addr().String(), "hostKey", sshserver.SignerFingerprint(signer.PublicKey()), "clients", len(keys))
+		srv = sshserver.NewServer(sshserver.NewSSHKeyIdentifier(keys), st, signer, cfg.Repo, func(ctx context.Context) (map[string]string, error) {
+			return gitmirror.ReadRefs(ctx, cfg.Repo)
+		})
+		if certMgr != nil {
+			srv.Certs = certMgr
+		}
+		if ipm != nil {
+			srv.IPLists = ipm
+		}
+		maxStale := time.Duration(cfg.MaxStaleSeconds) * time.Second
+		srv.Fresh = func() error { return mirror.Fresh(maxStale) }
+	} else {
+		slog.Info("ssh is off: no listen address in the config")
+	}
 	if issuing {
 		go certMgr.Run(ctx) // only once the listener is up
-	}
-	srv := sshserver.NewServer(sshserver.NewSSHKeyIdentifier(keys), st, signer, cfg.Repo, func(ctx context.Context) (map[string]string, error) {
-		return gitmirror.ReadRefs(ctx, cfg.Repo)
-	})
-	if certMgr != nil {
-		srv.Certs = certMgr
-	}
-	if ipm != nil {
-		srv.IPLists = ipm
 	}
 	if cfg.HTTPS.Listen != "" {
 		key, err := hubkey.Read(cfg.HTTPS.Key)
@@ -137,13 +149,21 @@ func serve(ctx context.Context, cfg config.Config) error {
 		} else {
 			slog.Info("https identity", "pin", pin)
 			hs := httpsapi.NewServer(cfg.AgeRecipients(), st)
+			if certMgr != nil {
+				hs.Certs = certMgr
+			}
+			if ipm != nil {
+				hs.IPLists = ipm
+			}
 			hs.Bundles = &httpsapi.Bundles{Repo: cfg.Repo, Fresh: func() error { return mirror.Fresh(time.Duration(cfg.MaxStaleSeconds) * time.Second) }}
 			run := &httpsapi.Runner{Key: key, Addresses: cfg.HTTPSAddresses, Listen: cfg.HTTPS.Listen, Server: hs}
 			go run.Run(ctx)
 		}
 	}
-	maxStale := time.Duration(cfg.MaxStaleSeconds) * time.Second
-	srv.Fresh = func() error { return mirror.Fresh(maxStale) }
+	if srv == nil {
+		<-ctx.Done()
+		return nil
+	}
 	return srv.Serve(ctx, ln)
 }
 

@@ -461,6 +461,12 @@ type IPListSource interface {
 	Serve(name string) (IPListPayload, error)
 }
 
+// Has reports whether name is a configured list (whoever may fetch it).
+func (m *IPManager) Has(name string) bool {
+	_, ok := m.Lists[name]
+	return ok
+}
+
 func (m *IPManager) Allowed(name, host string) bool {
 	l, ok := m.Lists[name]
 	if !ok {

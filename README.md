@@ -25,6 +25,7 @@ HTTPS (trusting only the pinned hub key), decrypts it with the host's age key, v
 infra-agent run [--once]          run the cycle every INFRA_AGENT_INTERVAL (default 5m), or once
 infra-agent status [-o json]      what is applied and verified, and the last result
 infra-agent check-config          validate agent.env and the token, ask each hub for /v1/healthz
+infra-agent cert <name> [--hub URL] [--out-dir DIR]   fetch a certificate from the hubs, decrypted with the age key
 infra-agent version
 ```
 
@@ -74,10 +75,13 @@ Deprecated, removed in the next release: the old spellings `-config`, `-no-refs`
 snake_case JSON (also available as the hidden `--format legacy`) unless `-o` is given.
 
 - **HTTPS for agents.** With `https.listen` set the hub also serves `GET /v1/healthz`, `POST /v1/challenge`,
-  `POST /v1/report` and `GET /v1/bundle/<host>` (the age-encrypted config bundle, format in
-  [docs/bundle.md](docs/bundle.md)) over TLS 1.3, using a self-signed certificate built from the hub identity key, which agents pin
+  `POST /v1/report`, `GET /v1/bundle/<host>` (the age-encrypted config bundle, format in
+  [docs/bundle.md](docs/bundle.md)), `GET /v1/cert/<host>/<name>` (the owner's certificate and key, age-encrypted to the
+  host) and `GET /v1/iplist/<name>` (public JSON, `ETag`/`304`; `HEAD` works) over TLS 1.3, using a self-signed certificate built from the hub identity key, which agents pin
   (see [docs/hub-key.md](docs/hub-key.md)). A host proves it holds its age key by decrypting a single-use nonce; its
-  latest report shows up in `status -o json` under `hosts[].report`. SSH is unchanged.
+  latest report shows up in `status -o json` under `hosts[].report`. SSH is unchanged, and optional: without `listen` in
+  the config no SSH server starts (`hostKey` and the clients' `sshKey` are then not needed, a client may have only an
+  `agePublicKey`), while certificates and IP lists are still managed and served over HTTPS.
 
 The config is one JSON file; see `internal/config/config.go` for every field. The HTTPS part (all values are
 examples):

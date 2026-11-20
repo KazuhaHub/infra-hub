@@ -24,6 +24,7 @@ import (
 	"filippo.io/age"
 
 	"github.com/KazuhaHub/infra-hub/internal/bundle"
+	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/httpsapi"
 	"github.com/KazuhaHub/infra-hub/internal/hubkey"
 	"github.com/KazuhaHub/infra-hub/internal/jointoken"
@@ -51,6 +52,27 @@ type World struct {
 	infra, attst string // work trees
 	n            int
 	published    map[string][3][]byte // commit -> statement, signature, tarball, for Republish
+	// Certs, when set before a hub is started, is what the hub serves under /v1/cert.
+	Certs certs.CertSource
+}
+
+// StaticCerts is a certificate source with fixed content: every name in Owners is served to its owner with Payload
+// (whose Name is filled in), unless Err is set.
+type StaticCerts struct {
+	Owners  map[string]string
+	Payload certs.CertPayload
+	Err     error
+}
+
+func (s *StaticCerts) Owner(name string) (string, bool) { h, ok := s.Owners[name]; return h, ok }
+
+func (s *StaticCerts) Fetch(name string) (certs.CertPayload, error) {
+	if s.Err != nil {
+		return certs.CertPayload{}, s.Err
+	}
+	p := s.Payload
+	p.Name = name
+	return p, nil
 }
 
 // Options shape one published bundle.
@@ -270,6 +292,7 @@ func (w *World) startHub(mirror string) *Hub {
 	base := time.Now()
 	srv.Now = func() time.Time { return base.Add(time.Duration(ticks.Add(1)) * 10 * time.Second) }
 	srv.Bundles = &httpsapi.Bundles{Repo: mirror}
+	srv.Certs = w.Certs
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	must(t, err)
 	h.URL = "https://" + ln.Addr().String()

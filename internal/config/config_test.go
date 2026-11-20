@@ -269,3 +269,52 @@ func TestDeprecatedSnakeCaseKeys(t *testing.T) {
 		t.Error("unknown key accepted")
 	}
 }
+
+func TestConfigWithoutSSH(t *testing.T) {
+	_, k := testutil.NewKey(t)
+	id, _ := age.GenerateX25519Identity()
+	age1 := id.Recipient().String()
+	base := `{"repo":"/x/infra.git","upstream":"u"%s}`
+	for name, extra := range map[string]string{
+		"no clients":            ``,
+		"age-only client":       `,"clients":{"h":{"agePublicKey":"` + age1 + `"}}`,
+		"object without keys":   `,"clients":{"h":{"agePublicKey":"` + age1 + `"}},"certs":{"a.example.org":"h"}`,
+		"ssh client kept":       `,"clients":{"h":"` + k + `"}`,
+		"list without hosts":    `,"ipSources":{"c":{"url":"https://e.example/x","format":"lines"}},"ipLists":{"l":{"providers":["c"]}}`,
+		"hostKey but no listen": `,"hostKey":"/x/hk"`,
+	} {
+		c, err := ParseConfig([]byte(strings.Replace(base, "%s", extra, 1)))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if c.SSHEnabled() {
+			t.Errorf("%s: SSH is on", name)
+		}
+		if keys, err := c.ClientKeys(); err != nil {
+			t.Errorf("%s: ClientKeys: %v", name, err)
+		} else if name == "ssh client kept" && len(keys) != 1 {
+			t.Errorf("%s: keys %v", name, keys)
+		}
+	}
+	for name, cfg := range map[string]string{
+		"listen without hostKey": `{"listen":"1.2.3.4:1","repo":"/x/infra.git","upstream":"u","clients":{"h":"` + k + `"}}`,
+		"relative hostKey":       `{"repo":"/x/infra.git","upstream":"u","hostKey":"hk"}`,
+		"listen, no clients":     `{"listen":"1.2.3.4:1","repo":"/x/infra.git","upstream":"u","hostKey":"/k"}`,
+		"junk key without ssh":   `{"repo":"/x/infra.git","upstream":"u","clients":{"h":"ssh-ed25519 nope"}}`,
+		"cert owner unknown":     `{"repo":"/x/infra.git","upstream":"u","certs":{"a.example.org":"h"}}`,
+	} {
+		if _, err := ParseConfig([]byte(cfg)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	// The current form still loads as before: SSH on, keys parsed, an age-only client skipped.
+	cur := `{"listen":"192.0.2.10:11882","repo":"/x/infra.git","upstream":"u","hostKey":"/x/hk","clients":{"a":"` + k + `","b":{"agePublicKey":"` + age1 + `"}}}`
+	c, err := ParseConfig([]byte(cur))
+	if err != nil || !c.SSHEnabled() {
+		t.Fatalf("%v", err)
+	}
+	if keys, err := c.ClientKeys(); err != nil || len(keys) != 1 || keys["a"] == nil {
+		t.Errorf("keys %v %v", keys, err)
+	}
+}

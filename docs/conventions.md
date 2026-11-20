@@ -45,7 +45,7 @@ family. Where Rackbook already decided something, this follows Rackbook.
 
 ## HTTP API (hub)
 
-- Paths are `/v1/<noun>` (`/v1/bundle`, `/v1/challenge`, `/v1/report`, `/v1/certs/<name>`, `/v1/iplists/<name>`).
+- Paths are `/v1/<noun>` (`/v1/bundle/<host>`, `/v1/challenge`, `/v1/report`, `/v1/cert/<host>/<name>`, `/v1/iplist/<name>`).
 - Errors are JSON `{"apiVersion":"v1","error":{"code":"not_found","message":"..."}}` with a matching HTTP status;
   `code` is a stable snake_case token, `message` is for people.
 - Conditional GET with `ETag` / `If-None-Match`; unchanged resources answer `304`.

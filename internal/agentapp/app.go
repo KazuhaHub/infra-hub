@@ -123,7 +123,7 @@ func (c *cli) newRoot() *cobra.Command {
 	for _, n := range hiddenFlags {
 		_ = pf.MarkHidden(n)
 	}
-	root.AddCommand(c.newRun(), c.newStatus(), c.newCheckConfig(), c.newVersion())
+	root.AddCommand(c.newRun(), c.newStatus(), c.newCheckConfig(), c.newCert(), c.newVersion())
 	return root
 }
 
