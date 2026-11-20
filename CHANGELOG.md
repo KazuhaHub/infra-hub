@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `infra-agent` v1 (`cmd/infra-agent`): fetches the host's bundle from the hubs over pinned TLS 1.3, decrypts it with the
+  host's age key, verifies it (`ssh-keygen -Y verify`, namespace `infra-bundle`, statement checks, forward-only by
+  statement time), extracts it safely into `<state>/releases/<commit>`, applies it with ansible (apply mode) and
+  reports. Commands `run [--once]`, `status [-o json]`, `check-config` and `version`; configuration in
+  `/etc/infra-agent/agent.env`; a lock keeps two agents apart. Released with infra-hub from the same tag
+  (`infra-agent-linux-amd64`, `infra-agent-linux-arm64`). See docs/agent.md and the example unit docs/infra-agent.service.
+
+### Changed
+
+- `POST /v1/report` accepts the results `verified`, `rejected`, `unreachable` and `unchanged` besides `ok` and `failed`, and
+  `appliedCommit` may be empty (nothing applied yet). A report with another result is still refused with `400 bad_report`,
+  and a non-empty `appliedCommit` must still be a full lower-case commit id. `status -o json` leaves `appliedCommit` out
+  when it is empty.
+
 ## v0.5.0
 
 ### Added

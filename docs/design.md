@@ -1,14 +1,14 @@
 # Target design
 
-Status: the hub speaks SSH (unchanged) and, since phase 1, HTTPS. The agent is not written yet; this document is what
-the next changes build towards.
+Status: the hub speaks SSH (unchanged) and, since phase 1, HTTPS. The agent exists since phase 2 (it fetches, verifies,
+applies and reports the config bundle, see [agent.md](agent.md)); this document is what the remaining phases build towards.
 
 | Phase | Content | State |
 | --- | --- | --- |
 | 1 | Hub side: hub identity key and token, HTTPS, `/v1/healthz`, `/v1/challenge`, `/v1/report`, reports in `status` | done |
-| 2 | `infra-agent`: challenge-response client, report sender, polling | open |
+| 2 | `infra-agent` v1: challenge-response client, report sender, polling, bundle fetch, verify and apply (see [agent.md](agent.md)) | done, to be run beside infra-pull first |
 | 3a | Hub side of `GET /v1/bundle/<host>` (format in [bundle.md](bundle.md)) | done |
-| 3 | Agent side of the bundle, certificates and IP lists over HTTPS, install script, kick, self-update | open |
+| 3 | Agent side of certificates and IP lists over HTTPS, install script, kick, self-update (the agent side of the bundle is in phase 2) | open |
 | 4 | Hub key rotation across agents, SSH removed | open |
 
 ## Goals
@@ -24,7 +24,7 @@ the next changes build towards.
 - **infra** (private repository, not in this repo): inventory, feature templates, Ansible roles and SOPS secrets.
   Its CI produces the signed bundle.
 - **infra-hub** (this repo): the server. Serves bundles, issues certificates, collects IP lists, receives reports.
-- **infra-agent** (this repo, to be written): runs on every machine, applies config and reports.
+- **infra-agent** (this repo, v1 in [agent.md](agent.md)): runs on every machine, applies config and reports.
 
 ## infra to machine
 
@@ -104,7 +104,7 @@ Implemented in phase 1: `POST /v1/challenge` (body `{"host":"<name>"}`) returns 
 32-byte nonce, encrypted to the host's `agePublicKey` from the hub config. `POST /v1/report` carries
 `{"apiVersion":"v1","host":...,"nonce":"<hex of the decrypted nonce>","report":{...}}`. A nonce is single use, valid
 5 minutes, held in memory (bounded). Challenges are rate limited per host and per peer address. The report is
-validated (`appliedCommit`, `result` ok or failed, `message`, `time`, `features[]`; at most 64 KiB), the latest one per
+validated (`appliedCommit` or empty, `result` one of ok, failed, verified, rejected, unreachable, unchanged, `message`, `time`, `features[]`; at most 64 KiB), the latest one per
 host is stored in the hub's state and appears in `infra-hub status -o json` as `hosts[].report`. Errors are
 `401 bad_nonce`, `400 bad_report`, `413 too_large`, `429 rate_limited`, `404 unknown_host`.
 
