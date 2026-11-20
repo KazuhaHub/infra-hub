@@ -8,17 +8,24 @@
   "hosts": [
     {
       "name": "app-1",
-      "lastSeen": "2026-11-19T08:20:23Z",
-      "main": "1111111111111111111111111111111111111111"
+      "report": {
+        "result": "failed",
+        "message": "feature x failed",
+        "time": "2026-11-19T08:20:20Z",
+        "receivedAt": "2026-11-19T08:20:23Z"
+      }
     },
     {
       "name": "spare3"
     },
     {
       "name": "web-2",
-      "lastSeen": "2026-11-19T08:17:33Z",
-      "main": "1111111111111111111111111111111111111111",
-      "mainAttestation": "2222222222222222222222222222222222222222"
+      "report": {
+        "appliedCommit": "1111111111111111111111111111111111111111",
+        "result": "ok",
+        "time": "2026-11-19T08:17:30Z",
+        "receivedAt": "2026-11-19T08:17:33Z"
+      }
     }
   ],
   "issuer": "enabled",
@@ -74,10 +81,6 @@
           "fastly"
         ],
         "manual": 1,
-        "hosts": [
-          "app-1",
-          "web-2"
-        ],
         "entries": 63,
         "version": "0123456789abcdef",
         "warnings": [],

@@ -278,7 +278,7 @@ func newIPTestManager(t *testing.T, f *fakeProvider, manual ...string) (*IPManag
 	return &IPManager{
 		Dir:     filepath.Join(t.TempDir(), "iplists"),
 		Sources: map[string]IPSource{"cdn": {URL: f.srv.URL, Format: "lines"}},
-		Lists:   map[string]IPList{"cdn": {Providers: []string{"cdn"}, Manual: manual, Hosts: []string{"host-a"}}},
+		Lists:   map[string]IPList{"cdn": {Providers: []string{"cdn"}, Manual: manual}},
 		Now:     clk.now,
 		Client:  &http.Client{Timeout: 300 * time.Millisecond},
 	}, clk
@@ -585,7 +585,7 @@ func TestStatusShowsProvidersListsAndHeld(t *testing.T) {
 	if p.Count != 10 || p.LastSuccess == nil || p.LastChange == nil || p.LastError != "HTTP 500" || p.Held || p.Failures != 1 {
 		t.Fatalf("%+v", p)
 	}
-	if l := st.Lists["cdn"]; l.Entries != 11 || l.Manual != 1 || l.Version == "" || !reflect.DeepEqual(l.Hosts, []string{"host-a"}) {
+	if l := st.Lists["cdn"]; l.Entries != 11 || l.Manual != 1 || l.Version == "" {
 		t.Fatalf("%+v", l)
 	}
 	f.set(ranges(10)...)

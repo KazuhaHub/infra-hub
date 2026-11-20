@@ -1,5 +1,5 @@
-// Command infra-hub is the hub: a read-only git mirror of the config repository served over SSH to the hosts that
-// are listed in its config, plus certificates and IP lists. See README.md and docs/design.md.
+// Command infra-hub is the hub: it mirrors the config repository and serves the signed config bundle, certificates and
+// IP lists to its agents over HTTPS. See README.md and docs/design.md.
 //
 //	infra-hub serve   [--config file]
 //	infra-hub status  [--config file] [-o json]

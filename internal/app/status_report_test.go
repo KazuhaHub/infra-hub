@@ -41,8 +41,14 @@ func TestStatusShowsTheReport(t *testing.T) {
 	if len(feats) != 1 || feats[0].(map[string]any)["name"] != "x" {
 		t.Errorf("features: %v", rep["features"])
 	}
-	if doc.Hosts[0]["lastSeen"] != "2026-11-19T08:00:00Z" {
-		t.Errorf("the host's other fields were lost: %v", doc.Hosts[0])
+	// The SSH server's per-host fields are gone from the v1 document; the report's receivedAt is the time the hub heard from the host.
+	for _, k := range []string{"lastSeen", "main", "mainAttestation"} {
+		if _, ok := doc.Hosts[0][k]; ok {
+			t.Errorf("status still has %s: %v", k, doc.Hosts[0])
+		}
+	}
+	if doc.Hosts[0]["name"] != "h1" || doc.APIVersion != "v1" {
+		t.Errorf("name or apiVersion lost: %v %q", doc.Hosts[0], doc.APIVersion)
 	}
 	// The table mentions it, and a host that never reported has no "report" key.
 	if _, table, _ := run(t, "status", "--config", h.config, "--no-refs"); !strings.Contains(table, "failed 0123456789ab") {
@@ -54,10 +60,10 @@ func TestStatusShowsTheReport(t *testing.T) {
 	if strings.Contains(out, `"report"`) {
 		t.Errorf("a host without a report shows one:\n%s", out)
 	}
-	// The legacy document is unchanged by reports.
+	// The legacy document has no report; its last_seen is the report's receivedAt.
 	_, legacy, _ := run(t, "status", "--config", h.config, "--no-refs", "--format", "legacy")
-	if strings.Contains(legacy, "report") || strings.Contains(legacy, "feature x") {
-		t.Errorf("legacy status leaks the report:\n%s", legacy)
+	if strings.Contains(legacy, "report") || strings.Contains(legacy, "feature x") || !strings.Contains(legacy, `"last_seen": "2026-11-19T08:10:02Z"`) {
+		t.Errorf("legacy status:\n%s", legacy)
 	}
 }
 

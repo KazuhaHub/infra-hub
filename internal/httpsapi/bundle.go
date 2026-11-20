@@ -28,7 +28,7 @@ const maxCacheBytes = 256 << 20
 // ciphertext per host. A new tip drops all of it.
 type Bundles struct {
 	Repo string
-	// Fresh returns an error when the mirror is too old to serve from (the same rule as the SSH side).
+	// Fresh returns an error when the mirror is too old to serve from.
 	Fresh func() error
 	// Limits defaults to bundle.DefaultLimits.
 	Limits bundle.Limits

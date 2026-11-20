@@ -10,11 +10,9 @@ import (
 	"github.com/KazuhaHub/infra-hub/internal/atomicfile"
 )
 
-// NodeRecord is what the hub remembers about one client host.
+// NodeRecord is one host in the legacy status document: the time of the host's latest report.
 type NodeRecord struct {
-	LastSeen        time.Time `json:"last_seen"`
-	Main            string    `json:"main,omitempty"`             // main as shown to the host's last fetch
-	MainAttestation string    `json:"main_attestation,omitempty"` // main-attestation, likewise
+	LastSeen time.Time `json:"last_seen"`
 }
 
 // HostReport is the latest report an agent sent; the fields are those of the API and of `status -o json`.
@@ -38,21 +36,20 @@ type FeatureSummary struct {
 
 type stateFile struct {
 	// MirrorLastSuccess is the last time the mirror fetched from upstream successfully (shown by `infra-hub status`).
-	MirrorLastSuccess time.Time             `json:"mirror_last_success"`
-	Hosts             map[string]NodeRecord `json:"hosts"` // keyed by host name
-	// Reports is the latest report per host; kept apart from Hosts so the legacy status document is unchanged.
+	MirrorLastSuccess time.Time `json:"mirror_last_success"`
+	// Reports is the latest report per host. Older files also have a "hosts" object (last-seen times of the removed SSH
+	// server); it is ignored on load and not written.
 	Reports map[string]HostReport `json:"reports,omitempty"`
 }
 
-// State keeps the per-host records in memory and in a small JSON file. Touch only marks the state dirty; Flush
-// (called every few seconds and on shutdown) writes it, so a busy hub does not rewrite the file per request.
+// State keeps the mirror time and the latest report per host in memory and in a small JSON file. Setters only mark the
+// state dirty; Flush (called every few seconds and on shutdown) writes it, so a busy hub does not rewrite the file per request.
 type State struct {
 	path string
 	now  func() time.Time
 
 	wmu     sync.Mutex // serialises Flush, so an older copy never lands after a newer one
 	mu      sync.Mutex
-	hosts   map[string]NodeRecord
 	reports map[string]HostReport
 	mirror  time.Time
 	dirty   bool
@@ -61,7 +58,7 @@ type State struct {
 
 // LoadState reads path; a missing file is an empty state. A damaged file is an error (the caller starts empty).
 func LoadState(path string) (*State, error) {
-	s := &State{path: path, now: time.Now, hosts: map[string]NodeRecord{}, reports: map[string]HostReport{}}
+	s := &State{path: path, now: time.Now, reports: map[string]HostReport{}}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return s, nil
@@ -74,9 +71,6 @@ func LoadState(path string) (*State, error) {
 		return s, fmt.Errorf("state file %s: %w", path, err)
 	}
 	s.mirror = f.MirrorLastSuccess
-	if f.Hosts != nil {
-		s.hosts = f.Hosts
-	}
 	if f.Reports != nil {
 		s.reports = f.Reports
 	}
@@ -102,20 +96,6 @@ func (s *State) Reports() map[string]HostReport {
 	return out
 }
 
-// Touch records that the host was just seen; refs (may be nil) are the refs the hub holds at that moment.
-func (s *State) Touch(host string, refs map[string]string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	r := s.hosts[host]
-	r.LastSeen = s.now().UTC().Truncate(time.Second)
-	if refs != nil {
-		r.Main = refs["refs/heads/main"]
-		r.MainAttestation = refs["refs/heads/main-attestation"]
-	}
-	s.hosts[host] = r
-	s.dirty = true
-}
-
 // SetMirrorSuccess records a successful upstream fetch.
 func (s *State) SetMirrorSuccess(t time.Time) {
 	s.mu.Lock()
@@ -131,17 +111,6 @@ func (s *State) MirrorSuccess() time.Time {
 	return s.mirror
 }
 
-// Snapshot is a copy of the records.
-func (s *State) Snapshot() map[string]NodeRecord {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make(map[string]NodeRecord, len(s.hosts))
-	for k, v := range s.hosts {
-		out[k] = v
-	}
-	return out
-}
-
 // Flush writes the file if anything changed. On error the state stays dirty and is tried again.
 func (s *State) Flush() error {
 	s.wmu.Lock()
@@ -151,7 +120,7 @@ func (s *State) Flush() error {
 		s.mu.Unlock()
 		return nil
 	}
-	data, err := json.MarshalIndent(stateFile{MirrorLastSuccess: s.mirror, Hosts: s.hosts, Reports: s.reports}, "", "  ")
+	data, err := json.MarshalIndent(stateFile{MirrorLastSuccess: s.mirror, Reports: s.reports}, "", "  ")
 	s.dirty = false
 	s.mu.Unlock()
 	if err == nil {

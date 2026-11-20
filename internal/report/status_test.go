@@ -26,10 +26,10 @@ func fixture() StatusInput {
 		Main:              "1111111111111111111111111111111111111111",
 		MainAttestation:   "2222222222222222222222222222222222222222",
 		MirrorLastSuccess: now.Add(-95 * time.Second),
-		Hosts: map[string]state.NodeRecord{
-			"web-2":  {LastSeen: now.Add(-3 * time.Minute), Main: "1111111111111111111111111111111111111111", MainAttestation: "2222222222222222222222222222222222222222"},
-			"app-1":  {LastSeen: now.Add(-10 * time.Second), Main: "1111111111111111111111111111111111111111"},
-			"spare3": {}, // configured, never fetched
+		Hosts:             []string{"web-2", "app-1", "spare3"}, // spare3: configured, never reported
+		Reports: map[string]state.HostReport{
+			"web-2": {AppliedCommit: "1111111111111111111111111111111111111111", Result: "ok", Time: "2026-11-19T08:17:30Z", ReceivedAt: "2026-11-19T08:17:33Z"},
+			"app-1": {Result: "failed", Message: "feature x failed", Time: "2026-11-19T08:20:20Z", ReceivedAt: "2026-11-19T08:20:23Z"},
 		},
 		Issuer: "enabled",
 		Certs: map[string]certs.CertStatus{
@@ -43,7 +43,7 @@ func fixture() StatusInput {
 				"cloudflare": {LastSuccess: sp("2026-11-19T08:10:00Z"), Count: 22, LastChange: sp("2026-11-19T08:10:00Z"), Held: true, HeldReason: "grew by 60%", Pending: 36},
 			},
 			Lists: map[string]iplists.ListStatus{
-				"edge": {Providers: []string{"cloudflare", "fastly"}, Manual: 1, Hosts: []string{"app-1", "web-2"}, Entries: 63, Version: "0123456789abcdef",
+				"edge": {Providers: []string{"cloudflare", "fastly"}, Manual: 1, Entries: 63, Version: "0123456789abcdef",
 					Warnings: []string{}, History: []iplists.HistoryEntry{{Time: "2026-11-19T08:10:00Z", Event: "held", Provider: "cloudflare", Version: "0123456789abcdef",
 						PreviousVersion: "0123456789abcdef", Added: []string{"198.51.100.0/24"}, Removed: []string{}, AddedCount: 1, CountBefore: 22, CountAfter: 36, Reason: "grew by 60%"}}},
 			},

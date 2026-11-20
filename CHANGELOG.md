@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.10.0
+
+The SSH server is removed. The hub is its HTTPS server: bundle, certificates, IP lists, challenge and report.
+
+### Removed
+
+- The SSH server (`internal/sshserver`): git upload-pack serving of the mirror, the `cert` and `iplist` commands over SSH,
+  the SSH host key (generated and kept at `hostKey` until now) and the SSH client identity by public key. The git
+  mirror and its fetch from upstream stay: `GET /v1/bundle/<host>` is built from it.
+- `status`: the per-host `lastSeen`, `main` and `mainAttestation` (they were only fed by SSH fetches) and the per-list
+  `hosts`. `apiVersion` stays `v1`: consumers that ignore missing fields keep working. The time the hub last heard from a
+  host is the report's `receivedAt` (`hosts[].report`); the table shows the report and its time. The legacy snake_case
+  document (`--format legacy`) keeps its shape: a host's `last_seen` is now its latest report's `receivedAt` (zero if it
+  never reported), and its per-host `main` and `main_attestation` and the lists' `hosts` are gone.
+- The `hosts` records of the state file (last-seen times of SSH fetches) are no longer read or written; an old state file
+  still loads.
+- The `golang.org/x/crypto` direct dependency (it remains only as a dependency of age and lego).
+
+### Changed
+
+- Config compatibility: a release must accept the previous release's config, because hubs follow the latest release. The
+  keys of the removed server are still accepted and ignored, with one warning at startup that names them: `listen`,
+  `hostKey` (and `host_key`), `clients.*.sshKey` (also a client written as an SSH key string) and `ipLists.*.hosts`.
+  They are never an error, and they can be deleted at leisure. Everything else is validated as before; a client may now
+  be `{}`.
+- A config without `https.listen` is refused: there is no other listener. An unusable hub identity key (or an HTTPS
+  server that stops) makes `serve` exit with an error instead of idling; the check now happens before the mirror
+  starts.
+- IP lists are public data on HTTPS and no longer have an allow list; the list's hosts are not checked against the
+  clients.
+
 ## v0.9.0
 
 ### Added

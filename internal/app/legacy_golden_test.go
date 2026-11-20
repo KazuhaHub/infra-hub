@@ -13,16 +13,14 @@ import (
 	"github.com/KazuhaHub/infra-hub/internal/config"
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
 	"github.com/KazuhaHub/infra-hub/internal/report"
-	"github.com/KazuhaHub/infra-hub/internal/testutil"
 )
 
-// testdata/status-legacy-origin-main.json is the output of the binary built from origin/main (commit f9fdeeb, the
-// last commit before the conventions change) for `infra-hub status -config <dir>/config.json -no-refs`, run against
-// the state tree that writeLegacyFixture creates. Only the two values that depend on the wall clock were replaced:
-// "time" by 2026-11-19T08:20:33Z and "mirror_age_seconds" by 95 (the mirror success is 95 s before that time).
-//
-// To regenerate: go test ./internal/app -run TestWriteLegacyFixture -fixture-dir=$DIR; build origin/main; run its
-// `status -config $DIR/config.json -no-refs`; substitute those two values.
+// testdata/status-legacy-origin-main.json is the legacy (snake_case) status for the state tree that writeLegacyFixture
+// creates. It began as the output of the binary built from origin/main (commit f9fdeeb) for
+// `infra-hub status -config <dir>/config.json -no-refs`, with "time" replaced by 2026-11-19T08:20:33Z and
+// "mirror_age_seconds" by 95 (the mirror success is 95 s before that time). Since v0.10.0 it was edited by hand: a
+// host's last_seen is the time of its latest report (the SSH server that fed it is gone), the per-host main and
+// main_attestation are gone, and the lists have no "hosts".
 var fixtureDir = flag.String("fixture-dir", "", "write the legacy status fixture tree here and stop")
 
 func TestWriteLegacyFixture(t *testing.T) {
@@ -37,21 +35,20 @@ func TestWriteLegacyFixture(t *testing.T) {
 // provider's last success is far in the future so that no "stale" warning depends on the clock.
 func writeLegacyFixture(t *testing.T, dir string) string {
 	t.Helper()
-	_, k1 := testutil.NewKey(t)
-	_, k2 := testutil.NewKey(t)
 	cfgData, _ := json.Marshal(map[string]any{
-		"listen": "127.0.0.1:11882", "repo": filepath.Join(dir, "infra.git"), "upstream": "git@example.invalid:x/infra.git",
-		"hostKey": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": k1, "h2": k2},
+		"repo": filepath.Join(dir, "infra.git"), "upstream": "git@example.invalid:x/infra.git",
+		"httpsAddresses": []string{"127.0.0.1"}, "https": map[string]any{"listen": "127.0.0.1:18443", "key": filepath.Join(dir, "hub.key")},
+		"clients":   map[string]any{"h1": map[string]any{}, "h2": map[string]any{}},
 		"certs":     map[string]string{"a.example.org": "h1", "b.example.org": "h2"},
 		"ipSources": map[string]any{"cdn": map[string]any{"url": "https://example.invalid/ips", "format": "lines"}},
-		"ipLists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}, "manual": []string{"8.8.8.0/24"}, "hosts": []string{"h1", "h2"}}},
+		"ipLists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}, "manual": []string{"8.8.8.0/24"}}},
 	})
 	cfgPath := filepath.Join(dir, "config.json")
 	must(t, os.MkdirAll(dir, 0o700))
 	must(t, os.WriteFile(cfgPath, cfgData, 0o600))
 	must(t, os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{
   "mirror_last_success": "2026-11-19T08:18:58Z",
-  "hosts": {"h2": {"last_seen": "2026-11-19T08:17:33Z", "main": "1111111111111111111111111111111111111111", "main_attestation": "2222222222222222222222222222222222222222"}}
+  "reports": {"h2": {"result": "ok", "time": "2026-11-19T08:17:30Z", "receivedAt": "2026-11-19T08:17:33Z"}}
 }
 `), 0o644))
 	store := certs.CertStore{Dir: filepath.Join(dir, "certs")}

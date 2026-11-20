@@ -5,48 +5,35 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"filippo.io/age"
+	"net"
 
 	"github.com/KazuhaHub/infra-hub/internal/config"
-	"github.com/KazuhaHub/infra-hub/internal/hubkey"
 	"github.com/KazuhaHub/infra-hub/internal/hubtrust"
 	"github.com/KazuhaHub/infra-hub/internal/logx"
 )
 
-// A hub without `listen` runs no SSH server and still serves IP lists and certificates over HTTPS.
-func TestServeWithoutSSH(t *testing.T) {
+// The hub is its HTTPS server. The config here is one written for v0.9.0 (SSH keys and all): the SSH keys are
+// ignored, nothing listens on the old SSH address, and certificates and IP lists are served over HTTPS.
+func TestServeStartsWithHTTPSOnly(t *testing.T) {
 	dir := t.TempDir()
-	key, err := hubkey.Generate()
-	if err != nil {
-		t.Fatal(err)
-	}
-	pin, _ := hubkey.Pin(key)
-	keyPath := filepath.Join(dir, "hub.key")
-	data, _ := hubkey.Marshal(key)
-	if err := os.WriteFile(keyPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	keyPath, pin := writeHubKey(t, dir)
 	id, _ := age.GenerateX25519Identity()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	httpsAddr := ln.Addr().String()
-	ln.Close()
+	sshAddr, httpsAddr := freeAddr(t), freeAddr(t)
+	const sshKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dB4w4rTZe"
 	cfgData, _ := json.Marshal(map[string]any{
+		"listen": sshAddr, "hostKey": filepath.Join(dir, "host_key"),
 		"repo": filepath.Join(dir, "infra.git"), "upstream": filepath.Join(dir, "no-such-upstream.git"),
-		"clients":        map[string]any{"h1": map[string]string{"agePublicKey": id.Recipient().String()}},
+		"clients":        map[string]any{"h1": map[string]string{"sshKey": sshKey, "agePublicKey": id.Recipient().String()}, "h2": sshKey},
 		"httpsAddresses": []string{"127.0.0.1"}, "https": map[string]any{"listen": httpsAddr, "key": keyPath},
 		"certs":   map[string]string{"a.example.org": "h1"},
-		"ipLists": map[string]any{"edge": map[string]any{"manual": []string{"11.9.0.0/24"}}},
+		"ipLists": map[string]any{"edge": map[string]any{"manual": []string{"11.9.0.0/24"}, "hosts": []string{"h1"}}},
 	})
 	cfg, err := config.ParseConfig(cfgData)
 	if err != nil {
@@ -62,8 +49,9 @@ func TestServeWithoutSSH(t *testing.T) {
 	go func() { serve(ctx, cfg); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
 	waitFor(t, logs, "https listening")
-	if !strings.Contains(logs.String(), "ssh is off") {
-		t.Errorf("no note that SSH is off:\n%s", logs.String())
+	if conn, err := net.DialTimeout("tcp", sshAddr, time.Second); err == nil {
+		conn.Close()
+		t.Error("something listens on the old SSH address")
 	}
 
 	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: hubtrust.Verifier{Pins: []string{pin}, Host: "127.0.0.1"}.TLSConfig()}}
@@ -82,8 +70,8 @@ func TestServeWithoutSSH(t *testing.T) {
 	if code, body := get("/v1/iplist/edge"); code != 200 || !strings.Contains(body, `"11.9.0.0/24"`) {
 		t.Errorf("iplist: %d %s", code, body)
 	}
-	if code, body := get("/v1/iplist/other"); code != 404 {
-		t.Errorf("unknown list: %d %s", code, body)
+	if code, _ := get("/v1/iplist/other"); code != 404 {
+		t.Errorf("unknown list: %d", code)
 	}
 	// The name is configured but nothing was issued: the hub is not serving it (no Cloudflare token here).
 	if code, body := get("/v1/cert/h1/a.example.org"); code != 503 || !strings.Contains(body, "not_serving") {
@@ -94,24 +82,12 @@ func TestServeWithoutSSH(t *testing.T) {
 	}
 }
 
-// Without SSH, a hub whose HTTPS cannot start must fail, not idle.
-func TestServeWithoutSSHFailsWhenHTTPSCannotStart(t *testing.T) {
-	dir := t.TempDir()
-	id, _ := age.GenerateX25519Identity()
-	cfgData, _ := json.Marshal(map[string]any{
-		"repo": filepath.Join(dir, "infra.git"), "upstream": filepath.Join(dir, "no-such-upstream.git"),
-		"clients":        map[string]any{"h1": map[string]string{"agePublicKey": id.Recipient().String()}},
-		"httpsAddresses": []string{"127.0.0.1"}, "https": map[string]any{"listen": "127.0.0.1:18443", "key": filepath.Join(dir, "missing.key")},
-	})
-	cfg, err := config.ParseConfig(cfgData)
-	if err != nil {
-		t.Fatal(err)
-	}
+// serve without an HTTPS listener has nothing to serve and says so.
+func TestServeWithoutHTTPSListenerFails(t *testing.T) {
+	cfg := config.Config{Repo: filepath.Join(t.TempDir(), "infra.git"), Upstream: "x", MirrorIntervalSeconds: 60}
 	prev := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := serve(ctx, cfg); err == nil || ctx.Err() != nil {
-		t.Fatalf("serve returned %v (context error %v)", err, ctx.Err())
+	if err := serve(context.Background(), cfg); err == nil {
+		t.Fatal("serve returned nil")
 	}
 }

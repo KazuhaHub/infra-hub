@@ -22,7 +22,7 @@ type IPListProvider interface {
 
 var ipListNameRe = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 
-// iplist answers GET and HEAD /v1/iplist/<name>: the JSON line that `iplist <name>` sends over SSH. The lists are public
+// iplist answers GET and HEAD /v1/iplist/<name>: the list as one JSON line. The lists are public
 // data (provider ranges and manual entries), so there is no host in the path and nothing is encrypted.
 func (s *Server) iplist(w http.ResponseWriter, r *http.Request, name string) {
 	peer := remoteKey(r.RemoteAddr)

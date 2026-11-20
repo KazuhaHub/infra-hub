@@ -22,8 +22,8 @@ type StatusInput struct {
 	Now               time.Time
 	Main              string
 	MainAttestation   string
-	MirrorLastSuccess time.Time // zero: the mirror has never fetched
-	Hosts             map[string]state.NodeRecord
+	MirrorLastSuccess time.Time                   // zero: the mirror has never fetched
+	Hosts             []string                    // the configured clients
 	Reports           map[string]state.HostReport // the latest agent report per host
 	Issuer            string
 	Certs             map[string]certs.CertStatus
@@ -64,12 +64,10 @@ type Bundle struct {
 	Message string `json:"message,omitempty"`
 }
 
-// Host is one configured client; lastSeen is omitted for a host that has never fetched.
+// Host is one configured client. Releases before v0.10.0 also had lastSeen, main and mainAttestation here, fed by the
+// SSH server; they are gone (the report's receivedAt is the time the hub last heard from the host).
 type Host struct {
-	Name            string `json:"name"`
-	LastSeen        string `json:"lastSeen,omitempty"`
-	Main            string `json:"main,omitempty"`
-	MainAttestation string `json:"mainAttestation,omitempty"`
+	Name string `json:"name"`
 	// Report is the latest report the host's agent sent over HTTPS; omitted until it has sent one.
 	Report *state.HostReport `json:"report,omitempty"`
 }
@@ -116,7 +114,6 @@ type List struct {
 	Name      string         `json:"name"`
 	Providers []string       `json:"providers"`
 	Manual    int            `json:"manual"`
-	Hosts     []string       `json:"hosts"`
 	Entries   int            `json:"entries"`
 	Version   string         `json:"version,omitempty"`
 	Warnings  []string       `json:"warnings"`
@@ -161,9 +158,10 @@ func NewStatus(in StatusInput) Status {
 		out.MirrorAgeSeconds = &age
 		out.MirrorLastSuccess = Time(in.MirrorLastSuccess)
 	}
-	for _, name := range sortedKeys(in.Hosts) {
-		h := in.Hosts[name]
-		host := Host{Name: name, LastSeen: Time(h.LastSeen), Main: h.Main, MainAttestation: h.MainAttestation}
+	hosts := append([]string(nil), in.Hosts...)
+	sort.Strings(hosts)
+	for _, name := range hosts {
+		host := Host{Name: name}
 		if r, ok := in.Reports[name]; ok {
 			r.Features = append([]state.FeatureSummary(nil), r.Features...)
 			host.Report = &r
@@ -188,7 +186,7 @@ func NewStatus(in StatusInput) Status {
 		}
 		for _, name := range sortedKeys(in.IPLists.Lists) {
 			l := in.IPLists.Lists[name]
-			ip.Lists = append(ip.Lists, List{Name: name, Providers: strs(l.Providers), Manual: l.Manual, Hosts: strs(l.Hosts), Entries: l.Entries,
+			ip.Lists = append(ip.Lists, List{Name: name, Providers: strs(l.Providers), Manual: l.Manual, Entries: l.Entries,
 				Version: l.Version, Warnings: strs(l.Warnings), History: NewHistoryEntries(l.History)})
 		}
 		out.IPLists = ip
@@ -212,11 +210,16 @@ type legacyStatus struct {
 
 // Legacy renders the previous document.
 func Legacy(in StatusInput) any {
-	out := legacyStatus{Time: in.Now.UTC().Format(time.RFC3339), Main: in.Main, MainAttestation: in.MainAttestation,
-		Hosts: in.Hosts, Issuer: in.Issuer, Certs: in.Certs, IPLists: in.IPLists}
-	if out.Hosts == nil {
-		out.Hosts = map[string]state.NodeRecord{}
+	hosts := map[string]state.NodeRecord{}
+	for _, name := range in.Hosts { // last_seen is the time of the host's latest report (the SSH server that fed it is gone)
+		var rec state.NodeRecord
+		if r, ok := in.Reports[name]; ok {
+			rec.LastSeen, _ = time.Parse(time.RFC3339, r.ReceivedAt)
+		}
+		hosts[name] = rec
 	}
+	out := legacyStatus{Time: in.Now.UTC().Format(time.RFC3339), Main: in.Main, MainAttestation: in.MainAttestation,
+		Hosts: hosts, Issuer: in.Issuer, Certs: in.Certs, IPLists: in.IPLists}
 	if out.Certs == nil {
 		out.Certs = map[string]certs.CertStatus{}
 	}

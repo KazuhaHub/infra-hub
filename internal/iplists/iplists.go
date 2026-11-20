@@ -22,8 +22,7 @@ import (
 )
 
 // IP lists on the hub. A provider is a named source (URL, format) that the hub downloads every few hours; a list is
-// the union of some providers and some manual entries, and is served to the hosts the config names (`iplist <name>`
-// over the SSH server). Everything comes from the config, which is rendered from the inventory; nothing a client
+// the union of some providers and some manual entries, and is served over HTTPS (public data, to any agent). Everything comes from the config, which is rendered from the inventory; nothing a client
 // sends can add a provider, a list or an entry.
 
 const (
@@ -45,12 +44,10 @@ const (
 
 var NameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 
-// IPList is a named list: providers plus manual entries, served to Hosts.
+// IPList is a named list: providers plus manual entries. Every agent may fetch it (the lists are public data).
 type IPList struct {
 	Providers []string `json:"providers"`
 	Manual    []string `json:"manual"`
-	// Hosts may fetch this list. Rendered from the hosts that have an output for it in the inventory.
-	Hosts []string `json:"hosts"`
 }
 
 // ProviderState is what the hub remembers about one provider (<dir>/<name>.json): the last good list and how the
@@ -455,29 +452,10 @@ type IPListPayload struct {
 	Warnings []string `json:"warnings"`
 }
 
-// IPListSource is what the SSH server needs.
-type IPListSource interface {
-	Allowed(name, host string) bool
-	Serve(name string) (IPListPayload, error)
-}
-
 // Has reports whether name is a configured list (whoever may fetch it).
 func (m *IPManager) Has(name string) bool {
 	_, ok := m.Lists[name]
 	return ok
-}
-
-func (m *IPManager) Allowed(name, host string) bool {
-	l, ok := m.Lists[name]
-	if !ok {
-		return false
-	}
-	for _, h := range l.Hosts {
-		if h == host {
-			return true
-		}
-	}
-	return false
 }
 
 // printable keeps a text short and plain ASCII (it ends up in a reply and in mails).
@@ -599,7 +577,6 @@ type ProviderStatus struct {
 type ListStatus struct {
 	Providers []string `json:"providers"`
 	Manual    int      `json:"manual"`
-	Hosts     []string `json:"hosts"`
 	Entries   int      `json:"entries"` // 0 while a provider has not delivered
 	Version   string   `json:"version,omitempty"`
 	Warnings  []string `json:"warnings"`
@@ -632,12 +609,10 @@ func (m *IPManager) Status() IPStatus {
 			LastError: st.LastError, Failures: st.Failures, NextAttempt: ts(st.NextAttempt), Held: st.Held, HeldReason: st.HeldReason, Pending: len(st.Pending), Failing: st.Failures >= FailingAfterRuns}
 	}
 	for name, l := range m.Lists {
-		hosts := append([]string{}, l.Hosts...)
-		sort.Strings(hosts)
 		m.mu.Lock()
 		warn := m.warnings(l)
 		m.mu.Unlock()
-		ls := ListStatus{Providers: l.Providers, Manual: len(l.Manual), Hosts: hosts, Warnings: warn,
+		ls := ListStatus{Providers: l.Providers, Manual: len(l.Manual), Warnings: warn,
 			History: ReadHistory(m.Dir, name, HistoryInStatus)}
 		if p, err := m.Serve(name); err == nil {
 			ls.Entries, ls.Version = len(p.CIDRs), p.Version

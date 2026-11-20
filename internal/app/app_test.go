@@ -14,7 +14,6 @@ import (
 	"github.com/KazuhaHub/infra-hub/internal/config"
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
 	"github.com/KazuhaHub/infra-hub/internal/logx"
-	"github.com/KazuhaHub/infra-hub/internal/testutil"
 	"github.com/KazuhaHub/infra-hub/internal/version"
 	legolog "github.com/go-acme/lego/v4/log"
 )
@@ -28,12 +27,12 @@ type hubDir struct {
 func newHub(t *testing.T) hubDir {
 	t.Helper()
 	dir := t.TempDir()
-	_, key := testutil.NewKey(t)
 	cfg := map[string]any{
-		"listen": "127.0.0.1:11882", "repo": filepath.Join(dir, "infra.git"), "upstream": "git@example.invalid:x/infra.git",
-		"hostKey": filepath.Join(dir, "host_key"), "clients": map[string]string{"h1": key},
+		"repo": filepath.Join(dir, "infra.git"), "upstream": "git@example.invalid:x/infra.git",
+		"httpsAddresses": []string{"127.0.0.1"}, "https": map[string]any{"listen": "127.0.0.1:18443", "key": filepath.Join(dir, "hub.key")},
+		"clients":   map[string]any{"h1": map[string]any{}},
 		"ipSources": map[string]any{"cdn": map[string]any{"url": "https://example.invalid/ips", "format": "lines"}},
-		"ipLists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}, "hosts": []string{"h1"}}},
+		"ipLists":   map[string]any{"edge": map[string]any{"providers": []string{"cdn"}}},
 	}
 	data, _ := json.Marshal(cfg)
 	path := filepath.Join(dir, "config.json")
@@ -46,7 +45,7 @@ func newHub(t *testing.T) hubDir {
 // markMirrored records a successful mirror fetch 90 seconds before the fixed test clock.
 func (h hubDir) markMirrored(t *testing.T) {
 	t.Helper()
-	data := `{"mirror_last_success":"` + fixedNow.Add(-90*time.Second).Format(time.RFC3339) + `","hosts":{"h1":{"last_seen":"2026-11-19T08:00:00Z","main":"abc"}}}`
+	data := `{"mirror_last_success":"` + fixedNow.Add(-90*time.Second).Format(time.RFC3339) + `"}`
 	if err := os.WriteFile(filepath.Join(h.dir, "state.json"), []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}

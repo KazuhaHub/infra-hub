@@ -35,8 +35,8 @@ family. Where Rackbook already decided something, this follows Rackbook.
 
 ## JSON (status, API, reports)
 
-- Field names are **lower camelCase**, as in Rackbook's API (`historyKept`, `tokenStatus`): `lastSeen`,
-  `mirrorAge`, `notAfter`.
+- Field names are **lower camelCase**, as in Rackbook's API (`historyKept`, `tokenStatus`): `mirrorAge`,
+  `notAfter`.
 - Times are RFC 3339 in UTC (`2026-11-19T08:20:33Z`); durations are integer seconds with the unit in the name
   (`mirrorAgeSeconds`).
 - Missing values are omitted (`omitempty`), not `null`, unless the absence itself carries meaning.
