@@ -8,12 +8,29 @@ One repository holds both programs and they are released together under one vers
 | Program | What it is | Status |
 | --- | --- | --- |
 | `cmd/infra-hub` | The server. Mirrors the configuration repository, issues certificates, collects IP lists, receives reports. | Works. Serves its clients over SSH (read-only git, `cert`, `iplist`); HTTPS for agents (challenge and report) is in. |
-| `cmd/infra-agent` | The per-machine agent. Pulls config, reports back, updates itself. | In progress. Not in the tree yet. |
+| `cmd/infra-agent` | The per-machine agent. Fetches the signed config bundle, verifies it, applies it with ansible, reports back. | v1 works ([docs/agent.md](docs/agent.md)); no install script and no self-update yet. Run it in verify mode beside infra-pull first. |
 
 The target design (no SSH, age keys, challenge-response, signed bundles) is written down in
-[docs/design.md](docs/design.md). Logging, CLI and JSON conventions shared with Rackbook are in [docs/conventions.md](docs/conventions.md). Phase 1 of the new transport (the hub side) is done; the agent comes next.
+[docs/design.md](docs/design.md). Logging, CLI and JSON conventions shared with Rackbook are in [docs/conventions.md](docs/conventions.md). The hub side (phase 1, 3a) and the agent's bundle path (phase 2) are done.
 
 This is the code only. Your data (inventory, templates, roles, secrets) stays in your own private repository.
+
+## The agent
+
+`infra-agent` runs as root under systemd on each managed host. It fetches the host's config bundle from the hubs over
+HTTPS (trusting only the pinned hub key), decrypts it with the host's age key, verifies the CI signature with
+`ssh-keygen -Y verify`, extracts it safely, applies it with `ansible-playbook` and reports the result. It opens no port.
+
+```
+infra-agent run [--once]          run the cycle every INFRA_AGENT_INTERVAL (default 5m), or once
+infra-agent status [-o json]      what is applied and verified, and the last result
+infra-agent check-config          validate agent.env and the token, ask each hub for /v1/healthz
+infra-agent version
+```
+
+Configuration is one env file (`/etc/infra/agent.env`): `INFRA_AGENT_TOKEN` and `INFRA_AGENT_HOST` are required;
+`INFRA_AGENT_MODE` is `verify` (default: never runs ansible) or `apply`. Everything is in [docs/agent.md](docs/agent.md),
+with an example systemd unit in [docs/infra-agent.service](docs/infra-agent.service).
 
 ## What the hub does today
 
@@ -99,7 +116,7 @@ else changes.
 
 ## Build and test
 
-Requires Go 1.26 or newer. The git tests also need `git` and `ssh` on the PATH (they are skipped otherwise).
+Requires Go 1.26 or newer. The git tests also need `git`, `ssh` and `ssh-keygen` on the PATH (they are skipped otherwise).
 
 ```
 go build ./...
@@ -112,6 +129,10 @@ Layout:
 
 ```
 cmd/infra-hub/       the server's main package
+cmd/infra-agent/     the agent's main package
+internal/agent/      the agent's engine: config, cycle, verification, extraction, apply, state, lock
+internal/agentapp/   the agent's command line
+internal/agenttest/  test bench: signed bundles, git mirror, real hub servers, ansible stub
 internal/app/        command line and wiring
 internal/sshserver/  the SSH server: identity, host key, git upload-pack, cert and iplist commands
 internal/gitmirror/  the read-only git mirror

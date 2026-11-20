@@ -60,3 +60,28 @@ func TestStatusShowsTheReport(t *testing.T) {
 		t.Errorf("legacy status leaks the report:\n%s", legacy)
 	}
 }
+
+func TestStatusShowsRejectedHubs(t *testing.T) {
+	h := newHub(t)
+	h.markMirrored(t)
+	st, err := state.LoadState(filepath.Join(h.dir, "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetReport("h1", state.HostReport{Result: "verified", Time: "2026-11-19T08:10:00Z", ReceivedAt: "2026-11-19T08:10:02Z", RejectedHubs: []string{"https://hub1.example.org:8443"}})
+	if err := st.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	_, out, _ := run(t, "status", "--config", h.config, "--no-refs", "-o", "json")
+	var doc struct {
+		Hosts []struct {
+			Report struct{ RejectedHubs []string }
+		}
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil || len(doc.Hosts[0].Report.RejectedHubs) != 1 {
+		t.Errorf("json: %v\n%s", err, out)
+	}
+	if _, table, _ := run(t, "status", "--config", h.config, "--no-refs"); !strings.Contains(table, "bad-bundle-from https://hub1.example.org:8443") {
+		t.Errorf("table:\n%s", table)
+	}
+}

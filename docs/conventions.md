@@ -14,7 +14,7 @@ family. Where Rackbook already decided something, this follows Rackbook.
 - The message is a short lower-case phrase without a trailing period; details go into attributes:
   `slog.Info("bundle applied", "version", v, "took", d)`.
 - Attribute names are the same everywhere (lower camelCase, like the JSON below): `host`, `feature`, `version`,
-  `from`, `to`, `list`, `provider`, `cert`, `path`, `took`, `err`.
+  `from`, `to`, `list`, `provider`, `cert`, `path`, `took`, `err`, `commit`, `hub`, `mode`, `result`, `statementTime`, `newest`, `message`.
 - Never log a secret, a private key, a token, a nonce, or a file's content that may hold one. Values that could be
   secret are logged as `[redacted]`.
 
@@ -22,7 +22,7 @@ family. Where Rackbook already decided something, this follows Rackbook.
 
 - `github.com/spf13/cobra`, as Rackbook's main command. One binary per program, subcommands for actions:
   `infra-hub serve`, `infra-hub status`, `infra-hub iplist accept`, `infra-agent run`, `infra-agent status`,
-  `infra-agent check-now`.
+  `infra-agent check-config`.
 - Flags are `--long-name` (single-letter short forms only for `-h`, `-v`, `-o`). Every flag can also come from the
   environment as `INFRA_HUB_<NAME>` / `INFRA_AGENT_<NAME>`; the environment file is the normal way to configure a
   service.

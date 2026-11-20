@@ -1,6 +1,6 @@
-# Builds every program under cmd/ as a static linux binary (amd64, arm64) when a v* tag is pushed, records a build
-# provenance attestation for each file, and publishes them as a GitHub release. Adding a program means adding a
-# directory under cmd/; nothing here changes.
+# Builds every program under cmd/ (infra-hub and infra-agent, released together from one tag) as a static linux binary
+# (amd64, arm64) when a v* tag is pushed, records a build provenance attestation for each file, and publishes them as a
+# GitHub release. Adding a program means adding a directory under cmd/; nothing here changes.
 name: release
 
 on:

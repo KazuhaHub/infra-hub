@@ -19,12 +19,14 @@ type NodeRecord struct {
 
 // HostReport is the latest report an agent sent; the fields are those of the API and of `status -o json`.
 type HostReport struct {
-	AppliedCommit string           `json:"appliedCommit"`
-	Result        string           `json:"result"` // ok or failed
+	AppliedCommit string           `json:"appliedCommit,omitempty"` // empty: nothing applied yet
+	Result        string           `json:"result"`                  // ok, failed, verified, rejected, unreachable or unchanged
 	Message       string           `json:"message,omitempty"`
 	Time          string           `json:"time"` // RFC 3339, as the agent stated it
 	Features      []FeatureSummary `json:"features,omitempty"`
-	ReceivedAt    string           `json:"receivedAt"` // RFC 3339 UTC, the hub's clock
+	// RejectedHubs are the hubs that served the agent a bundle it rejected in that cycle (hub URLs).
+	RejectedHubs []string `json:"rejectedHubs,omitempty"`
+	ReceivedAt   string   `json:"receivedAt"` // RFC 3339 UTC, the hub's clock
 }
 
 // FeatureSummary is the outcome of one feature in a report.

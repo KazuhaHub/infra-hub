@@ -69,4 +69,6 @@ serialized, so concurrent requests do not multiply this. `infra-hub status` read
 
 Decrypt with /etc/infra/age.key; tar must have exactly those three members; verify bundle.sig over bundle with
 principal infra-main, namespace infra-bundle, against the pinned allowed_signers; parse the statement strictly; repo/ref
-match; sha256 and size of bundle.tar.gz match; commit is the applied commit or a descendant (forward only); then extract.
+match; sha256 and size of bundle.tar.gz match; forward only: the statement time is strictly greater than the newest applied
+or verified one (the bundle has no git history, so a descendant check is not possible; the reasoning is in
+[agent.md](agent.md)); then extract. Implemented by `infra-agent` ([agent.md](agent.md)).

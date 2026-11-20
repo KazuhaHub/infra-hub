@@ -1,0 +1,39 @@
+# Example unit for infra-agent. Copy it to /etc/systemd/system/infra-agent.service, then:
+#   systemctl daemon-reload && systemctl enable --now infra-agent
+# The settings are in /etc/infra/agent.env (the default of --env-file) (docs/agent.md); the agent reads that file itself.
+[Unit]
+Description=infra-agent (fetch, verify and apply the config bundle, report)
+Documentation=https://github.com/KazuhaHub/infra-hub/blob/main/docs/agent.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/infra-agent run
+Restart=always
+RestartSec=30
+# On stop systemd sends SIGTERM to the agent only (KillMode=mixed). The agent then sends SIGTERM to ansible's process
+# group and SIGKILL to it after 30 s; the 60 s here leave room for that, and only then does systemd kill what is left.
+TimeoutStopSec=60
+KillMode=mixed
+
+# Hardening. ansible has to be able to change anything on the host (packages, /etc, services, users, kernel settings,
+# mounts), so this unit takes away nothing that a configuration run may need:
+#   - no ProtectSystem, ProtectHome, PrivateTmp, ReadWritePaths or other file system sandboxing: ansible's writes would
+#     fail or land in a private copy of the file system;
+#   - no User=: root is required;
+#   - no capability bounding, RestrictAddressFamilies or SystemCallFilter: tasks may need any of them.
+# NoNewPrivileges is the systemd default (no); it is written out so that nobody switches it on: tasks run sudo and
+# other setuid programs, and some roles install setuid files, all of which NoNewPrivileges=yes would break.
+NoNewPrivileges=no
+# The agent opens no listening port. Logs go to the journal (stderr); nothing writes log files.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=infra-agent
+# ansible needs a HOME and a PATH that finds ansible-playbook, git and sops.
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+[Install]
+WantedBy=multi-user.target
