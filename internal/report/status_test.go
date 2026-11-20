@@ -131,3 +131,19 @@ func TestListsAreSortedByName(t *testing.T) {
 		t.Errorf("not sorted: %+v", s)
 	}
 }
+
+func TestStatusBundle(t *testing.T) {
+	in := StatusInput{Now: fixture().Now, Bundle: &BundleInput{Commit: "0123456789abcdef0123456789abcdef01234567", Time: time.Unix(1790000000, 0)}}
+	data, _ := json.Marshal(NewStatus(in).Bundle)
+	if string(data) != `{"served":true,"commit":"0123456789abcdef0123456789abcdef01234567","time":"2026-09-21T14:13:20Z"}` {
+		t.Errorf("served: %s", data)
+	}
+	in.Bundle = &BundleInput{Reason: "stale_mirror", Message: "the mirror is out of date"}
+	data, _ = json.Marshal(NewStatus(in).Bundle)
+	if string(data) != `{"served":false,"reason":"stale_mirror","message":"the mirror is out of date"}` {
+		t.Errorf("not served: %s", data)
+	}
+	if NewStatus(StatusInput{Now: in.Now}).Bundle != nil {
+		t.Error("an unexamined bundle must be omitted")
+	}
+}

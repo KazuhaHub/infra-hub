@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"filippo.io/age"
@@ -35,9 +36,11 @@ type Server struct {
 	Reports    ReportStore
 	Now        func() time.Time
 	Rand       io.Reader
+	// Bundles serves /v1/bundle/<host>; nil means no bundles.
+	Bundles *Bundles
 
-	nonces                            *nonceStore
-	challengeHost, challengeIP, repIP *limiter
+	nonces                                      *nonceStore
+	challengeHost, challengeIP, repIP, bundleIP *limiter
 }
 
 // NewServer returns a server with the default rate limits: a challenge is limited per host (60 a minute, burst 20) and
@@ -45,7 +48,8 @@ type Server struct {
 // real nonce out of its outstanding set); a report per peer address as well.
 func NewServer(recipients map[string]age.Recipient, reports ReportStore) *Server {
 	return &Server{Recipients: recipients, Reports: reports, Now: time.Now, Rand: rand.Reader, nonces: newNonceStore(),
-		challengeHost: newLimiter(60, 20, 4096), challengeIP: newLimiter(12, 10, 16384), repIP: newLimiter(60, 20, 16384)}
+		challengeHost: newLimiter(60, 20, 4096), challengeIP: newLimiter(12, 10, 16384), repIP: newLimiter(60, 20, 16384),
+		bundleIP: newLimiter(30, 20, 16384)}
 }
 
 type errorBody struct {
@@ -79,6 +83,15 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var method string
 		var h http.HandlerFunc
+		if host, ok := strings.CutPrefix(r.URL.Path, "/v1/bundle/"); ok && host != "" {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				w.Header().Set("Allow", "GET, HEAD")
+				writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "use GET")
+				return
+			}
+			s.bundle(w, r, host)
+			return
+		}
 		switch r.URL.Path {
 		case "/v1/healthz":
 			method, h = http.MethodGet, s.healthz

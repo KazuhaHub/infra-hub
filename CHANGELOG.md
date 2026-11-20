@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `GET /v1/bundle/<host>` on the HTTPS listener: the config bundle, read from the tip of `main-attestation` in the mirror
+  (`bundle`, `bundle.sig`, `bundle.tar.gz`) and returned age-encrypted (binary) to the host's `agePublicKey` as an
+  uncompressed ustar with those three members in that order. `ETag` is the commit, `If-None-Match` gives `304`,
+  responses are `Cache-Control: no-store`, requests are rate limited per address, only GET and HEAD are allowed. Errors:
+  `404 unknown_host`, `503 no_bundle` (a file missing or over its limit, or a malformed statement), `503 stale_mirror`.
+  The hub parses the statement strictly but does not verify the signature or the hash; the agent does. The format is in
+  docs/bundle.md.
+- `internal/bundle`: `ParseStatement` (strict), the reader of the three files with size caps, and the archive writer.
+- The hub builds the archive once per tip and shares it between hosts, answers `If-None-Match` for the current tip from the cached
+  statement (no tarball read), and refuses a statement time outside 1..8589934591 with `no_bundle`. `status` reads only the
+  statement file.
+- `infra-hub status` shows the bundle the hub serves (`bundle` in `-o json`): its commit and time, or why none is served.
+
 ## v0.4.1
 
 ### Fixed

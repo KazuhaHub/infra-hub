@@ -46,6 +46,8 @@ is `INFRA_HUB_LOG_LEVEL`); the config file defaults to `/etc/infra-hub/config.js
 `warn` or `error`. Exit codes: `0` success, `1` the operation failed, `2` usage error, `3` not ready (`status`: the
 mirror has not fetched yet).
 
+`status` also shows the config bundle the hub serves (commit and time, or why none).
+
 `status -o json` prints the document described in [docs/conventions.md](docs/conventions.md): `"apiVersion": "v1"`,
 lower camelCase keys, RFC 3339 UTC times, durations as `...Seconds`, hosts, certificates, providers and lists as arrays
 sorted by name.
@@ -54,8 +56,9 @@ Deprecated, removed in the next release: the old spellings `-config`, `-no-refs`
 `iplist-history` still work and print a warning on stderr. With `-config`, `status` keeps printing the previous
 snake_case JSON (also available as the hidden `--format legacy`) unless `-o` is given.
 
-- **HTTPS for agents.** With `https.listen` set the hub also serves `GET /v1/healthz`, `POST /v1/challenge` and
-  `POST /v1/report` over TLS 1.3, using a self-signed certificate built from the hub identity key, which agents pin
+- **HTTPS for agents.** With `https.listen` set the hub also serves `GET /v1/healthz`, `POST /v1/challenge`,
+  `POST /v1/report` and `GET /v1/bundle/<host>` (the age-encrypted config bundle, format in
+  [docs/bundle.md](docs/bundle.md)) over TLS 1.3, using a self-signed certificate built from the hub identity key, which agents pin
   (see [docs/hub-key.md](docs/hub-key.md)). A host proves it holds its age key by decrypting a single-use nonce; its
   latest report shows up in `status -o json` under `hosts[].report`. SSH is unchanged.
 
@@ -117,6 +120,7 @@ internal/iplists/    IP list collection, validation, history
 internal/hubkey/     the hub identity key: generate, read, pin, the in-memory self-signed certificate
 internal/hubtrust/   how an agent decides to trust a hub: the leaf's key hash must match a pin
 internal/jointoken/  the one-line join token (`ih1.` + pins and hub URLs)
+internal/bundle/     the config bundle: statement parser, reader of the mirror, archive
 internal/httpsapi/   the hub's TLS identity and the /v1 HTTPS endpoints
 internal/config/     the config file
 internal/state/      per-host last-seen state

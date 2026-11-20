@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/KazuhaHub/infra-hub/internal/bundle"
 	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/config"
 	"github.com/KazuhaHub/infra-hub/internal/gitmirror"
@@ -95,7 +96,29 @@ func collectStatus(ctx context.Context, cfg config.Config, noRefs bool, now time
 		in.Hosts[name] = snap[name]
 	}
 	in.Reports = st.Reports()
+	if !noRefs {
+		in.Bundle = bundleStatus(ctx, cfg, in)
+	}
 	return in, nil
+}
+
+// bundleStatus is what GET /v1/bundle would answer, judged from the state file's mirror time (the running hub's own
+// clock of the last fetch is in its memory, so a freshly started hub may differ for a moment).
+func bundleStatus(ctx context.Context, cfg config.Config, in report.StatusInput) *report.BundleInput {
+	maxStale := time.Duration(cfg.MaxStaleSeconds) * time.Second
+	if in.MirrorLastSuccess.IsZero() || in.Now.Sub(in.MirrorLastSuccess) > maxStale {
+		return &report.BundleInput{Reason: "stale_mirror", Message: "the mirror is out of date"}
+	}
+	// Only the statement is read: the tarball can be 64 MiB and `status` runs often.
+	tip, err := bundle.Tip(ctx, cfg.Repo)
+	var st bundle.Statement
+	if err == nil {
+		st, err = bundle.LoadStatement(ctx, cfg.Repo, tip, bundle.DefaultLimits)
+	}
+	if err != nil {
+		return &report.BundleInput{Reason: "no_bundle", Message: err.Error()}
+	}
+	return &report.BundleInput{Commit: st.Commit, Time: time.Unix(st.Time, 0)}
 }
 
 func writeJSON(w io.Writer, v any) error {
@@ -127,6 +150,14 @@ func writeStatusTable(w io.Writer, s report.Status) error {
 	}
 	fmt.Fprintf(w, "mirror:   %s\n", mirror)
 	fmt.Fprintf(w, "main:     %s\nattested: %s\nissuer:   %s\n", short12(s.Main), short12(s.MainAttestation), s.Issuer)
+	switch b := s.Bundle; {
+	case b == nil:
+		fmt.Fprintf(w, "bundle:   not read\n")
+	case b.Served:
+		fmt.Fprintf(w, "bundle:   %s (%s)\n", short12(b.Commit), b.Time)
+	default:
+		fmt.Fprintf(w, "bundle:   none served (%s: %s)\n", b.Reason, b.Message)
+	}
 	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(tw, "\nHOST\tLAST SEEN\tMAIN\tREPORT")
 	for _, h := range s.Hosts {
