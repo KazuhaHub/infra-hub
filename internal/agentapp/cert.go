@@ -36,12 +36,14 @@ func (c *cli) newCert() *cobra.Command {
 				return err
 			}
 			var idx []int
+			found := false
 			for i, u := range cfg.Token.Hubs {
 				if only == "" || u == only {
 					idx = append(idx, i)
+					found = true
 				}
 			}
-			if len(idx) == 0 {
+			if !found {
 				return usageErrorf("--hub %q is not one of the hubs of the token (%s)", only, strings.Join(cfg.Token.Hubs, ", "))
 			}
 			id, err := agent.LoadIdentity(cfg.AgeKey)
@@ -54,7 +56,7 @@ func (c *cli) newCert() *cobra.Command {
 					return usageErrorf("--out-dir: %v", err)
 				}
 				defer dir.Close()
-				for _, i := range idx {
+				for i := range cfg.Token.Hubs { // every hub's stale files, whichever hubs are asked now
 					if err := dir.Clear(i); err != nil {
 						return usageErrorf("--out-dir: %v", err)
 					}
@@ -75,13 +77,14 @@ func (c *cli) newCert() *cobra.Command {
 				}
 				if err != nil {
 					fmt.Fprintf(c.stderr, "%s: hub %s: %s\n", program, hostPort(cfg.Token.Hubs[i]), oneLine(err.Error()))
-					if werr := dir.Write(i, false, []byte(oneLine(err.Error())+"\n")); werr != nil {
-						return fmt.Errorf("write %d.err: %w", i, werr)
+					if werr := writeCertFile(dir, i, false, []byte(oneLine(err.Error())+"\n")); werr != nil {
+						fmt.Fprintf(c.stderr, "%s: write %d.err: %v\n", program, i, werr)
 					}
 					continue
 				}
-				if werr := dir.Write(i, true, reply); werr != nil {
-					return fmt.Errorf("write %d.json: %w", i, werr)
+				if werr := writeCertFile(dir, i, true, reply); werr != nil {
+					fmt.Fprintf(c.stderr, "%s: write %d.json: %v\n", program, i, werr)
+					continue
 				}
 				answered++
 			}
@@ -119,3 +122,6 @@ func oneLine(s string) string {
 	}
 	return strings.TrimSpace(s)
 }
+
+// writeCertFile writes one result file (a variable so that a test can make a write fail).
+var writeCertFile = func(d *agent.CertOutDir, i int, ok bool, data []byte) error { return d.Write(i, ok, data) }

@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -119,6 +121,7 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 
 	var srv *sshserver.Server
+	var httpsDone chan struct{}
 	if cfg.SSHEnabled() {
 		slog.Info("listening", "addr", ln.Addr().String(), "hostKey", sshserver.SignerFingerprint(signer.PublicKey()), "clients", len(keys))
 		srv = sshserver.NewServer(sshserver.NewSSHKeyIdentifier(keys), st, signer, cfg.Repo, func(ctx context.Context) (map[string]string, error) {
@@ -144,8 +147,14 @@ func serve(ctx context.Context, cfg config.Config) error {
 		if err == nil {
 			pin, err = hubkey.Pin(key)
 		}
+		if err == nil && !cfg.SSHEnabled() {
+			_, err = hubkey.Certificate(key, cfg.HTTPSAddresses, time.Now())
+		}
 		if err != nil {
 			slog.Error("https is off: cannot use the hub identity key", "path", cfg.HTTPS.Key, "err", err)
+			if !cfg.SSHEnabled() {
+				return fmt.Errorf("https cannot start and ssh is off, so the hub would serve nothing: %w", err)
+			}
 		} else {
 			slog.Info("https identity", "pin", pin)
 			hs := httpsapi.NewServer(cfg.AgeRecipients(), st)
@@ -157,12 +166,21 @@ func serve(ctx context.Context, cfg config.Config) error {
 			}
 			hs.Bundles = &httpsapi.Bundles{Repo: cfg.Repo, Fresh: func() error { return mirror.Fresh(time.Duration(cfg.MaxStaleSeconds) * time.Second) }}
 			run := &httpsapi.Runner{Key: key, Addresses: cfg.HTTPSAddresses, Listen: cfg.HTTPS.Listen, Server: hs}
-			go run.Run(ctx)
+			httpsDone = make(chan struct{})
+			go func() { defer close(httpsDone); run.Run(ctx) }()
 		}
 	}
 	if srv == nil {
-		<-ctx.Done()
-		return nil
+		// Without SSH the hub is its HTTPS server: if that ends before the hub is stopped, the process must not idle.
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-httpsDone:
+			if ctx.Err() != nil {
+				return nil
+			}
+			return errors.New("the https server stopped and ssh is off, so the hub serves nothing")
+		}
 	}
 	return srv.Serve(ctx, ln)
 }

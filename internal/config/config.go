@@ -260,6 +260,9 @@ func ParseConfig(data []byte) (Config, error) {
 	if err := c.checkHTTPS(); err != nil {
 		return Config{}, err
 	}
+	if c.Listen == "" && c.HTTPS.Listen == "" {
+		return Config{}, errors.New("config: neither listen (SSH) nor https.listen is set; the hub would serve nothing")
+	}
 	if c.CertDir == "" {
 		c.CertDir = filepath.Join(filepath.Dir(c.Repo), "certs")
 	}

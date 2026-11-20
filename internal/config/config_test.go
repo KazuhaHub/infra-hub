@@ -274,7 +274,7 @@ func TestConfigWithoutSSH(t *testing.T) {
 	_, k := testutil.NewKey(t)
 	id, _ := age.GenerateX25519Identity()
 	age1 := id.Recipient().String()
-	base := `{"repo":"/x/infra.git","upstream":"u"%s}`
+	base := `{"repo":"/x/infra.git","upstream":"u","httpsAddresses":["192.0.2.1"],"https":{"listen":"192.0.2.1:8443","key":"/x/hub.key"}%s}`
 	for name, extra := range map[string]string{
 		"no clients":            ``,
 		"age-only client":       `,"clients":{"h":{"agePublicKey":"` + age1 + `"}}`,
@@ -300,6 +300,7 @@ func TestConfigWithoutSSH(t *testing.T) {
 	for name, cfg := range map[string]string{
 		"listen without hostKey": `{"listen":"1.2.3.4:1","repo":"/x/infra.git","upstream":"u","clients":{"h":"` + k + `"}}`,
 		"relative hostKey":       `{"repo":"/x/infra.git","upstream":"u","hostKey":"hk"}`,
+		"neither ssh nor https":  `{"repo":"/x/infra.git","upstream":"u","clients":{"h":{"agePublicKey":"` + age1 + `"}}}`,
 		"listen, no clients":     `{"listen":"1.2.3.4:1","repo":"/x/infra.git","upstream":"u","hostKey":"/k"}`,
 		"junk key without ssh":   `{"repo":"/x/infra.git","upstream":"u","clients":{"h":"ssh-ed25519 nope"}}`,
 		"cert owner unknown":     `{"repo":"/x/infra.git","upstream":"u","certs":{"a.example.org":"h"}}`,

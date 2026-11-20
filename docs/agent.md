@@ -220,12 +220,13 @@ missing or too close to expiry.
   printed over SSH) and the command exits 0. Reasons for hubs that failed go to stderr.
 - **With `--out-dir DIR`** every hub is asked, and for the hub at position `i` of the token (0-based) the command writes
   `DIR/<i>.json` (the decrypted answer) or `DIR/<i>.err` (a one-line reason). The directory is opened with
-  `O_DIRECTORY|O_NOFOLLOW` (a symlink as DIR is refused), stale `<i>.json` and `<i>.err` are removed first (a symlink
+  `openat2` and `RESOLVE_NO_SYMLINKS` (a symlink anywhere in the path is refused), the stale `<i>.json` and `<i>.err`
+  of every hub of the token are removed first, also with `--hub` (a symlink
   in their place is unlinked, never followed), and each file is created with `O_EXCL` under a temporary name in the
-  directory, set to mode 0600 and to the directory's owner and group, synced and renamed into place. With `--hub`
-  only that hub's files are touched.
+  directory, set to mode 0600 and to the directory's owner and group, synced and renamed into place. A file
+  that cannot be written is reported on stderr and the other hubs are still handled.
 
-Exit codes: 0 when at least one hub answered, 1 when none did, 2 for a configuration or usage error (a name that is
+Exit codes: 0 when at least one `.json` was written (or, without `--out-dir`, a hub answered), 1 when none was, 2 for a configuration or usage error (a name that is
 not a DNS name, `--hub` not in the token, an unusable `--out-dir`).
 
 ## Verify and apply mode

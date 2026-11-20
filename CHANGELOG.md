@@ -6,8 +6,8 @@
 
 - `GET /v1/iplist/<name>` (and `HEAD`) on the HTTPS listener: the same JSON object `iplist <name>` sends over SSH (`name`,
   `version`, `generated`, `cidrs`, `warnings`), as one line. The lists are public data: no host in the path, no
-  encryption, no allow list, and `ipLists.*.hosts` is ignored here. `ETag` is the list's `version` (quoted), so `If-None-Match`
-  answers `304` while the entries are unchanged. Errors: `404 not_found` (unknown list or a name that is not `[a-z0-9_-]{1,64}`), `503 not_serving`
+  encryption, no allow list, and `ipLists.*.hosts` is ignored here. `ETag` is a hash of the list's `version` and its sorted
+  `warnings`, so `If-None-Match` answers `304` until an entry or a warning changes (`generated` alone does not). Errors: `404 not_found` (unknown list or a name that is not `[a-z0-9_-]{1,64}`), `503 not_serving`
   (the list cannot be built: a provider never delivered or its state is unreadable), `429 rate_limited` (per peer
   address, 60 a minute, burst 20), `405` for other methods.
 - `GET /v1/cert/<host>/<name>`: the JSON line `cert <name>` sends over SSH (`name`, `fullchain`, `privkey`, `not_after`),
@@ -24,6 +24,8 @@
 
 ### Changed
 
+- A config with neither `listen` (SSH) nor `https.listen` is refused. Without SSH, a hub whose HTTPS server cannot start
+  (unusable identity key) or stops exits with an error instead of idling.
 - The SSH server is optional. Without `listen` in the config no SSH listener starts, and `hostKey` and the clients'
   `sshKey` are not needed (a client may have only an `agePublicKey`; `clients` may even be empty). Certificates and IP
   lists are managed either way. A config with `listen` loads exactly as before (it still needs `hostKey` and at least

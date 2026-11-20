@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/KazuhaHub/infra-hub/internal/agent"
 	"github.com/KazuhaHub/infra-hub/internal/agenttest"
 	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/hubkey"
@@ -163,8 +164,8 @@ func TestCertOutDir(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(dir, "1.err")); err != nil || !strings.Contains(string(b), "503") {
 		t.Errorf("1.err: %q %v", b, err)
 	}
-	if _, err := os.Lstat(filepath.Join(dir, "0.err")); err != nil {
-		t.Errorf("0.err of the hub that was not asked was removed: %v", err)
+	if _, err := os.Lstat(filepath.Join(dir, "0.err")); !os.IsNotExist(err) {
+		t.Errorf("stale 0.err of the hub that was not asked stays: %v", err)
 	}
 }
 
@@ -187,9 +188,46 @@ func TestCertOutDirIsNotFollowedWhenItIsASymlink(t *testing.T) {
 	if ents, _ := os.ReadDir(real); len(ents) != 0 {
 		t.Errorf("wrote through the symlink: %v", ents)
 	}
+	// A symlink in a parent directory is refused too, not only one at the end.
+	if err := os.Mkdir(filepath.Join(real, "inbox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := runAgent(t, nil, "cert", certName, "--out-dir", filepath.Join(link, "inbox"), "--env-file", envFile); code != 2 {
+		t.Errorf("symlinked parent: exit %d", code)
+	}
+	if ents, _ := os.ReadDir(filepath.Join(real, "inbox")); len(ents) != 0 {
+		t.Errorf("wrote through a symlinked parent: %v", ents)
+	}
 	file := filepath.Join(w.Dir, "plain")
 	os.WriteFile(file, nil, 0o600)
 	if code, _, _ := runAgent(t, nil, "cert", certName, "--out-dir", file, "--env-file", envFile); code != 2 {
 		t.Errorf("a file as out-dir: exit %d", code)
+	}
+}
+
+// A file that cannot be written for one hub does not stop the others; the exit code follows the .json files.
+func TestCertOutDirContinuesAfterAWriteFailure(t *testing.T) {
+	w, _ := certWorld(t)
+	good := w.StartHub()
+	dead := agenttest.DeadURL(t)
+	envFile := writeEnvFile(t, w, "verify", []string{good.URL, dead}, []string{good.Pin})
+	dir := filepath.Join(w.Dir, "out")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prev := writeCertFile
+	t.Cleanup(func() { writeCertFile = prev })
+	writeCertFile = func(d *agent.CertOutDir, i int, ok bool, data []byte) error {
+		if i == 0 {
+			return errors.New("disk full")
+		}
+		return d.Write(i, ok, data)
+	}
+	code, _, errs := runAgent(t, nil, "cert", certName, "--out-dir", dir, "--env-file", envFile)
+	if code != 1 || !strings.Contains(errs, "write 0.json") {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "1.err")); err != nil || len(b) == 0 {
+		t.Errorf("hub 1 was not written after hub 0 failed: %q %v", b, err)
 	}
 }

@@ -93,3 +93,25 @@ func TestServeWithoutSSH(t *testing.T) {
 		t.Errorf("unknown cert: %d", code)
 	}
 }
+
+// Without SSH, a hub whose HTTPS cannot start must fail, not idle.
+func TestServeWithoutSSHFailsWhenHTTPSCannotStart(t *testing.T) {
+	dir := t.TempDir()
+	id, _ := age.GenerateX25519Identity()
+	cfgData, _ := json.Marshal(map[string]any{
+		"repo": filepath.Join(dir, "infra.git"), "upstream": filepath.Join(dir, "no-such-upstream.git"),
+		"clients":        map[string]any{"h1": map[string]string{"agePublicKey": id.Recipient().String()}},
+		"httpsAddresses": []string{"127.0.0.1"}, "https": map[string]any{"listen": "127.0.0.1:18443", "key": filepath.Join(dir, "missing.key")},
+	})
+	cfg, err := config.ParseConfig(cfgData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := serve(ctx, cfg); err == nil || ctx.Err() != nil {
+		t.Fatalf("serve returned %v (context error %v)", err, ctx.Err())
+	}
+}

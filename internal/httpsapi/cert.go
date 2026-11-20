@@ -14,7 +14,10 @@ import (
 
 // notFoundCert is the one answer for every request for a certificate that is not the caller's to ask for: an unknown
 // host, an unknown name, a name owned by another host and a host without an age key look the same.
-func notFoundCert(w http.ResponseWriter) {
+// Every case is logged the same way, at debug level, so neither the log nor the timing tells them apart and an
+// unauthenticated peer cannot fill the log.
+func notFoundCert(w http.ResponseWriter, host, name, peer string) {
+	slog.Debug("cert not found", "host", host, "cert", name, "peer", peer)
 	writeError(w, http.StatusNotFound, "not_found", "no such certificate")
 }
 
@@ -29,12 +32,11 @@ func (s *Server) cert(w http.ResponseWriter, r *http.Request, host, name string)
 	}
 	rcpt, hasKey := s.Recipients[host]
 	if s.Certs == nil || !certs.NameRe.MatchString(name) || !hasKey {
-		notFoundCert(w)
+		notFoundCert(w, host, name, peer)
 		return
 	}
 	if owner, ok := s.Certs.Owner(name); !ok || owner != host {
-		slog.Warn("cert request denied", "host", host, "cert", name, "peer", peer, "reason", "not the owner or not a known name")
-		notFoundCert(w)
+		notFoundCert(w, host, name, peer)
 		return
 	}
 	p, err := s.Certs.Fetch(name)

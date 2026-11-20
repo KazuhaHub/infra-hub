@@ -1,11 +1,15 @@
 package httpsapi
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
 )
@@ -43,9 +47,7 @@ func (s *Server) iplist(w http.ResponseWriter, r *http.Request, name string) {
 	}
 	body = append(body, '\n')
 	slog.Info("iplist served", "list", name, "peer", peer, "version", p.Version, "entries", len(p.CIDRs), "warnings", len(p.Warnings))
-	// The validator is the list's version (a hash of its entries), not of the body: the body carries `generated`, which
-	// changes at every request, and warnings, which are not part of the version.
-	etag := `"` + p.Version + `"`
+	etag := listETag(p)
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "no-cache")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
@@ -59,4 +61,13 @@ func (s *Server) iplist(w http.ResponseWriter, r *http.Request, name string) {
 	if r.Method != http.MethodHead {
 		_, _ = w.Write(body)
 	}
+}
+
+// listETag identifies what a reader acts on: the list's version (a hash of its entries) and its warnings, in sorted
+// order. `generated` is left out, as it changes at every request, so a poll gets 304 until an entry or a warning changes.
+func listETag(p iplists.IPListPayload) string {
+	w := append([]string(nil), p.Warnings...)
+	sort.Strings(w)
+	sum := sha256.Sum256([]byte(p.Version + "\n" + strings.Join(w, "\n")))
+	return `"` + hex.EncodeToString(sum[:])[:32] + `"`
 }

@@ -13,7 +13,7 @@ import (
 )
 
 // CertOutDir writes the per-hub results of `infra-agent cert --out-dir`: <i>.json for a decrypted reply, <i>.err for
-// a one-line reason. The directory is opened without following a symlink at its last element, and every file is
+// a one-line reason. The directory is opened with openat2, so no component of its path may be a symlink, and every file is
 // created (O_EXCL, mode 0600, owned by the directory's owner) in it under a temporary name and renamed into place,
 // so nothing that is already in the directory is ever followed or written through.
 type CertOutDir struct {
@@ -22,7 +22,9 @@ type CertOutDir struct {
 
 // OpenCertOutDir opens dir for writing results.
 func OpenCertOutDir(dir string) (*CertOutDir, error) {
-	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	// No component of the path may be a symlink (a parent owned by someone else could be swapped for one).
+	fd, err := unix.Openat2(unix.AT_FDCWD, dir, &unix.OpenHow{Flags: unix.O_DIRECTORY | unix.O_RDONLY | unix.O_CLOEXEC,
+		Resolve: unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS})
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", dir, err)
 	}

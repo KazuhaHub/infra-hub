@@ -106,7 +106,7 @@ func (s *Server) Handler() http.Handler {
 			}
 			host, name, ok := strings.Cut(rest, "/")
 			if !ok || host == "" || name == "" || strings.Contains(name, "/") {
-				notFoundCert(w)
+				notFoundCert(w, host, name, remoteKey(r.RemoteAddr))
 				return
 			}
 			s.cert(w, r, host, name)

@@ -46,7 +46,7 @@ func TestIPListServed(t *testing.T) {
 	if string(r.body) != string(line)+"\n" {
 		t.Fatalf("body %q, SSH line %q", r.body, line)
 	}
-	if etag := r.header.Get("ETag"); etag != `"v1abc"` {
+	if etag := r.header.Get("ETag"); etag != listETag(f.p) || len(etag) != 34 {
 		t.Errorf("ETag %q", etag)
 	}
 	etag := r.header.Get("ETag")
@@ -62,6 +62,18 @@ func TestIPListServed(t *testing.T) {
 	if r := h.get(t, "192.0.2.1:1", "GET", "/v1/iplist/cdn", map[string]string{"If-None-Match": etag}); r.code != 304 {
 		t.Errorf("new generated time: %d", r.code)
 	}
+	f.p.Warnings = []string{"held:cdn 3 new entries"}
+	r2 := h.get(t, "192.0.2.1:1", "GET", "/v1/iplist/cdn", map[string]string{"If-None-Match": etag})
+	if r2.code != 200 || r2.header.Get("ETag") == etag {
+		t.Errorf("a new warning must change the validator: %d", r2.code)
+	}
+	f.p.Warnings = []string{"b", "a"}
+	e1 := h.get(t, "192.0.2.1:1", "GET", "/v1/iplist/cdn", nil).header.Get("ETag")
+	f.p.Warnings = []string{"a", "b"}
+	if e2 := h.get(t, "192.0.2.1:1", "GET", "/v1/iplist/cdn", nil).header.Get("ETag"); e1 != e2 {
+		t.Errorf("warning order changes the validator")
+	}
+	f.p.Warnings = nil
 	f.p.Version = "v1def"
 	if r := h.get(t, "192.0.2.1:1", "GET", "/v1/iplist/cdn", map[string]string{"If-None-Match": etag}); r.code != 200 {
 		t.Errorf("changed list: %d", r.code)
