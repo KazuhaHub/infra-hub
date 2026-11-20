@@ -24,6 +24,9 @@ table, or a key set twice, is an error: the agent exits with code 2 and names th
 | `INFRA_AGENT_MODE` | `verify` | `verify` or `apply` (below). |
 | `INFRA_AGENT_INTERVAL` | `5m` | Time between cycles, at least 10 s. Every wait gets a random difference of up to 10 %. |
 | `INFRA_AGENT_STATE_DIR` | `/var/lib/infra-agent` | State directory (below). |
+| `INFRA_AGENT_GITHUB_REPO` | empty (off) | Git URL of the infra repository, for the GitHub fallback (below), for example `git@github.com:KazuhaHub/infra.git`. |
+| `INFRA_AGENT_GITHUB_KEY` | `/etc/infra/deploy_key` | The deploy key for that repository. Setting it without `INFRA_AGENT_GITHUB_REPO` is an error. |
+| `INFRA_AGENT_GITHUB_KNOWN_HOSTS` | `/etc/infra/github_known_hosts` | The known_hosts file that pins GitHub's host key. Setting it without `INFRA_AGENT_GITHUB_REPO` is an error. |
 | `INFRA_AGENT_LOG_FORMAT`, `INFRA_AGENT_LOG_LEVEL` | `text`, `info` | The `--log-format` and `--log-level` flags, which can be set in the file too. |
 
 All paths must be absolute. An example:
@@ -165,6 +168,32 @@ file where a directory is needed, and the reverse), and an archive without `infr
 at 200000 entries. Files keep their permission bits without setuid, setgid and sticky, and belong to the user that runs
 the agent. Go's `os.Root` is a second guard: no file operation can leave the directory. A refused tarball is result
 `rejected`; a failure of the disk (no space, I/O error, permissions) is a fault of the host and result `failed`.
+
+## GitHub fallback (hub hosts)
+
+If a commit breaks the HTTPS of every hub, no agent can fetch the fix from a hub. A host that sets
+`INFRA_AGENT_GITHUB_REPO` can then take the bundle from GitHub itself. Only the hub hosts set it: the infra repository is
+private, so reading it needs the deploy key, and the hubs already have that key for their git mirror. The other hosts
+never hold it; they recover as soon as one hub is back, which the hub hosts make happen by applying the fix first.
+
+The fallback runs only when no hub gave a usable bundle: every hub was unreachable or failed, or every answer was
+rejected. A hub that answers "nothing new" (a `304`, the same bundle, an older one) is an answer, and GitHub is not asked.
+The agent then fetches `refs/heads/main-attestation` (depth 1, forced, no tags) into the bare repository
+`<state dir>/github.git` with the deploy key (`ssh -i`, `IdentitiesOnly`, `BatchMode`, `StrictHostKeyChecking=yes`, the
+known_hosts file above; 3 minutes at most) and reads the same three files the hubs read. Nothing else differs: the
+signature, the statement and hash, the forward-only rule, the extraction and the state are the same checks as for a
+bundle from a hub, minus the decryption (the files are plain in git).
+
+- A bundle that passes is verified, and applied in apply mode, as usual. The result's hub is `github`, the message says
+  that the bundle came from GitHub because no hub gave one, and the agent logs a warning every time it uses the fallback.
+  `status` shows it as the last hub.
+- A bundle that fails a check is `rejected`. One that is not newer than what was verified is ignored, as for a hub.
+- If the fetch fails, the result stays `unreachable` or `rejected` as the hubs left it, and the message gets
+  `; GitHub fallback: <error>` appended.
+- The report still goes to every hub, since none served the bundle.
+
+`check-config` prints the fallback settings (or `github fallback: off`) and checks that the key and the known_hosts file
+can be read.
 
 ## Verify and apply mode
 
