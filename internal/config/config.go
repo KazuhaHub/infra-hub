@@ -194,10 +194,10 @@ func normalizeKeys(data []byte) ([]byte, error) {
 	if err := json.Unmarshal(data, &top); err != nil || top == nil {
 		return data, nil
 	}
-	dropRemoved(top)
 	if err := renameDeprecated(top, deprecatedKeys, ""); err != nil {
 		return nil, err
 	}
+	dropRemoved(top) // after the renaming, so ip_lists and ipLists are both covered
 	if raw, ok := top["https"]; ok {
 		var h map[string]json.RawMessage
 		if json.Unmarshal(raw, &h) == nil {

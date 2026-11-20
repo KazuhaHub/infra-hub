@@ -202,6 +202,16 @@ func TestOldConfigWithSSHKeysLoadsWithOneWarning(t *testing.T) {
 	if _, err := ParseConfig([]byte(snake)); err != nil {
 		t.Errorf("host_key: %v", err)
 	}
+	// The snake_case spellings of the earlier releases (ip_lists, ip_sources) are covered as well, with one warning.
+	snakeOld := `{"host_key":"/k","repo":"/x/infra.git","upstream":"u",` + httpsBlock + `,"clients":{"a":{}},
+"ip_sources":{"c":{"url":"https://e.example/x","format":"lines"}},"ip_lists":{"l":{"providers":["c"],"hosts":["a"]}}}`
+	out = capture(t, func() { c, err = ParseConfig([]byte(snakeOld)) })
+	if err != nil || len(c.IPLists) != 1 {
+		t.Fatalf("snake_case old config: %v %+v", err, c.IPLists)
+	}
+	if n := strings.Count(out, "msg=\"config keys of the removed"); n != 1 || !strings.Contains(out, "host_key") || !strings.Contains(out, "ipLists.*.hosts") {
+		t.Errorf("warning for the snake_case spellings:\n%s", out)
+	}
 	// A config with none of these keys does not warn.
 	if out := capture(t, func() { _, err = ParseConfig([]byte(`{"repo":"/x/infra.git","upstream":"u",` + httpsBlock + `}`)) }); err != nil || out != "" {
 		t.Errorf("clean config: %v %q", err, out)

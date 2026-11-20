@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.10.0 (unreleased)
+## v0.10.0
 
 The SSH server is removed. The hub is its HTTPS server: bundle, certificates, IP lists, challenge and report.
 
