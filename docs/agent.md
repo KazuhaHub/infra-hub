@@ -173,8 +173,17 @@ the agent. Go's `os.Root` is a second guard: no file operation can leave the dir
 
 If a commit breaks the HTTPS of every hub, no agent can fetch the fix from a hub. A host that sets
 `INFRA_AGENT_GITHUB_REPO` can then take the bundle from GitHub itself. Only the hub hosts set it: the infra repository is
-private, so reading it needs the deploy key, and the hubs already have that key for their git mirror. The other hosts
-never hold it; they recover as soon as one hub is back, which the hub hosts make happen by applying the fix first.
+private, so reading it needs a deploy key, and only the hub hosts have a key that GitHub accepts (it is registered as a
+deploy key on the repository, and the hub already uses it for its git mirror). The `/etc/infra/deploy_key` that the
+bootstrap creates on the other hosts is only a client key for the hub's SSH server (being retired), not a GitHub deploy
+key. Those hosts recover as soon as one hub is back, which the hub hosts make happen by applying the fix first.
+
+`INFRA_AGENT_GITHUB_REPO` must be an ssh URL (`git@host:path` or `ssh://...`); the key and known_hosts paths may use only
+letters, digits, `.`, `_`, `-` and `/`, because they are passed to ssh through a shell. The fetch allows no transport but
+ssh, uses `ConnectTimeout=15` and trusts only the given known_hosts file. If a fetch fails (a killed git can leave a lock
+file behind, the repository may be damaged), the agent deletes `<state dir>/github.git` and fetches once more in the same
+cycle. A GitHub tree that holds no usable bundle (a missing file, a file over its limit, a malformed statement) is
+`rejected`.
 
 The fallback runs only when no hub gave a usable bundle: every hub was unreachable or failed, or every answer was
 rejected. A hub that answers "nothing new" (a `304`, the same bundle, an older one) is an answer, and GitHub is not asked.

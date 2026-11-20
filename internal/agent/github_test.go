@@ -3,16 +3,19 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/KazuhaHub/infra-hub/internal/agenttest"
+	"github.com/KazuhaHub/infra-hub/internal/testutil"
 )
 
 // githubAgent is an agent whose hubs are all down (or the given ones) and whose GitHub repository is the world's
 // main-attestation repository, read as a filesystem path (git fetches from a path the same way as from a URL).
 func githubAgent(t *testing.T, w *agenttest.World, mode, repo string, hubs ...string) *Agent {
 	t.Helper()
+	fileRepos(t)
 	a, _ := newAgentURLs(t, w, mode, hubs, []string{testPin})
 	a.Cfg.GitHubRepo = repo
 	return a
@@ -61,6 +64,7 @@ func TestGitHubFallbackWhenAllHubsAreDown(t *testing.T) {
 
 func TestGitHubIsNotAskedWhileAHubServes(t *testing.T) {
 	w := agenttest.NewWorld(t)
+	fileRepos(t)
 	hub := w.StartHub()
 	w.Publish(agenttest.Options{})
 	missing := filepath.Join(w.Dir, "no-such-repo")
@@ -109,6 +113,7 @@ func TestGitHubBundleIsChecked(t *testing.T) {
 }
 
 func TestGitHubOlderBundleIsIgnored(t *testing.T) {
+	fileRepos(t)
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
 	p1 := w.Publish(agenttest.Options{})
@@ -154,6 +159,7 @@ func TestGitHubFetchFailureIsAppended(t *testing.T) {
 	}
 
 	// All hubs rejecting is kept as rejected, with the failure appended.
+	fileRepos(t)
 	w2 := agenttest.NewWorld(t)
 	hub := w2.StartHub()
 	w2.Publish(agenttest.Options{OtherKey: true})
@@ -166,6 +172,7 @@ func TestGitHubFetchFailureIsAppended(t *testing.T) {
 }
 
 func TestGitHubRejectionKeepsTheHubNotes(t *testing.T) {
+	fileRepos(t)
 	// The hub serves a bundle that fails the signature check, and so does GitHub.
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
@@ -175,5 +182,89 @@ func TestGitHubRejectionKeepsTheHubNotes(t *testing.T) {
 	o := cycle(t, a)
 	if o.Result != ResultRejected || o.Hub != GitHubSource || !strings.Contains(o.Message, hub.URL) {
 		t.Fatalf("outcome %+v", o)
+	}
+}
+
+func TestGitHubNewerBundleAfterVerified(t *testing.T) {
+	fileRepos(t)
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	p1 := w.Publish(agenttest.Options{})
+	a, _ := newAgent(t, w, ModeApply, hub)
+	if o := cycle(t, a); o.Result != ResultOK {
+		t.Fatalf("first cycle %+v", o)
+	}
+	hub.Stop()
+	p2 := w.Publish(agenttest.Options{Time: p1.Time + 100})
+	a.Cfg.GitHubRepo = w.MirrorRepo
+	o := cycle(t, a)
+	if o.Result != ResultOK || o.Hub != GitHubSource || o.AppliedCommit != p2.Commit || len(w.StubRuns()) != 2 {
+		t.Fatalf("outcome %+v, runs %v", o, w.StubRuns())
+	}
+}
+
+func TestGitHubSecondFetchAndRecovery(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	p1 := w.Publish(agenttest.Options{})
+	a := githubAgent(t, w, ModeApply, w.MirrorRepo, agenttest.DeadURL(t))
+	if o := cycle(t, a); o.Result != ResultOK || o.AppliedCommit != p1.Commit {
+		t.Fatalf("first %+v", o)
+	}
+	// A newer tip is fetched into the existing shallow repository.
+	p2 := w.Publish(agenttest.Options{Time: p1.Time + 100})
+	if o := cycle(t, a); o.Result != ResultOK || o.AppliedCommit != p2.Commit {
+		t.Fatalf("second %+v", o)
+	}
+	// A killed git leaves a lock and a damaged object behind: the next fallback starts over and succeeds.
+	gd := githubDir(w.StateDir)
+	if err := os.WriteFile(filepath.Join(gd, "shallow.lock"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(gd, "objects", "ab"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gd, "objects", "ab", "cdef0123456789abcdef0123456789abcdef01"), []byte("garbage"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p3 := w.Publish(agenttest.Options{Time: p1.Time + 200})
+	if o := cycle(t, a); o.Result != ResultOK || o.AppliedCommit != p3.Commit {
+		t.Fatalf("after damage %+v", o)
+	}
+	if _, err := os.Stat(filepath.Join(gd, "shallow.lock")); err == nil {
+		t.Errorf("the lock is still there")
+	}
+}
+
+func TestGitHubMalformedTreeIsRejected(t *testing.T) {
+	fileRepos(t)
+	w := agenttest.NewWorld(t)
+	w.Publish(agenttest.Options{})
+	// A tree whose tarball is gone: the fetch works, the bundle is not there.
+	testutil.RunGit(t, filepath.Dir(w.MirrorRepo), "rm", "-q", "bundle.tar.gz")
+	testutil.RunGit(t, filepath.Dir(w.MirrorRepo), "commit", "-q", "-m", "drop the tarball")
+	a := githubAgent(t, w, ModeApply, w.MirrorRepo, agenttest.DeadURL(t))
+	o := cycle(t, a)
+	if o.Result != ResultRejected || o.Hub != GitHubSource || !strings.Contains(o.Message, "GitHub") {
+		t.Fatalf("outcome %+v", o)
+	}
+}
+
+func TestGitHubLegacyFloor(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	p := w.Publish(agenttest.Options{})
+	a := githubAgent(t, w, ModeVerify, w.MirrorRepo, agenttest.DeadURL(t))
+	floor := func(at int64) {
+		line := strings.Repeat("a", 40) + " " + strconv.FormatInt(at, 10) + "\n"
+		if err := os.WriteFile(a.InfraApplied, []byte(line), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	floor(p.Time + 1000) // infra-pull applied a main that is newer than this bundle
+	if o := cycle(t, a); o.Result != ResultUnchanged || len(releases(t, w)) != 0 {
+		t.Fatalf("older than the floor: %+v", o)
+	}
+	floor(p.Time) // a bundle signed at the applied time is that main or newer
+	if o := cycle(t, a); o.Result != ResultVerified {
+		t.Fatalf("at the floor: %+v", o)
 	}
 }

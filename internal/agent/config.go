@@ -73,6 +73,11 @@ type Config struct {
 	LogFormat, LogLevel string
 }
 
+var (
+	githubURLRe = regexp.MustCompile(`^(ssh://[A-Za-z0-9@._:\[\]%/~+-]+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._/~+-]+)$`)
+	safePathRe  = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+)
+
 var hostRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // ParseEnvFile reads KEY=VALUE lines (blank lines and lines starting with # are skipped; a value may be wrapped in
@@ -195,8 +200,8 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 		}
 	}
 	if c.GitHubRepo != "" {
-		if strings.HasPrefix(c.GitHubRepo, "-") || strings.ContainsAny(c.GitHubRepo, " \t\r\n") {
-			return c, configErrorf("%sGITHUB_REPO %q is not a git URL", EnvPrefix, c.GitHubRepo)
+		if !githubURLRe.MatchString(c.GitHubRepo) && !(allowFileProtocol && strings.HasPrefix(c.GitHubRepo, "/")) {
+			return c, configErrorf("%sGITHUB_REPO %q is not an ssh git URL (git@host:path or ssh://...)", EnvPrefix, c.GitHubRepo)
 		}
 		if v := get("GITHUB_KEY"); v != "" {
 			c.GitHubKey = v
@@ -209,6 +214,12 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 	paths := []string{c.AgeKey, c.Signers, c.StateDir}
 	if c.GitHubRepo != "" {
 		paths = append(paths, c.GitHubKey, c.GitHubKnownHosts)
+		// These two go into GIT_SSH_COMMAND, which git runs through a shell.
+		for _, p := range paths[3:] {
+			if strings.HasPrefix(p, "/") && !safePathRe.MatchString(p) {
+				return c, configErrorf("path %q: only letters, digits, . _ - and / are allowed", p)
+			}
+		}
 	}
 	for _, p := range paths {
 		if !strings.HasPrefix(p, "/") {

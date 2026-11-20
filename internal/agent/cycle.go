@@ -292,6 +292,11 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 func (a *Agent) githubFallback(ctx context.Context, st *State, failed Outcome) Outcome {
 	slog.Warn("no hub gave a bundle, trying the GitHub fallback", "host", a.Cfg.Host, "repo", a.Cfg.GitHubRepo, "hubs", failed.Message)
 	files, err := a.fetchGitHub(ctx)
+	var be *githubBundleError
+	if errors.As(err, &be) {
+		slog.Warn("bundle from GitHub is not usable", "err", err)
+		return Outcome{Result: ResultRejected, Message: "bundle from GitHub (no hub gave one) rejected: " + be.Error() + "; " + failed.Message, Hub: GitHubSource}
+	}
 	if err != nil {
 		slog.Warn("GitHub fallback failed", "err", err)
 		failed.Message += "; GitHub fallback: " + err.Error()
