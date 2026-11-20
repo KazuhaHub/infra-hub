@@ -2,6 +2,7 @@
 // IP lists to its agents over HTTPS. See README.md and docs/design.md.
 //
 //	infra-hub serve   [--config file]
+//	infra-hub check-config [--config file]
 //	infra-hub status  [--config file] [-o json]
 //	infra-hub iplist accept  <provider>
 //	infra-hub iplist history <list> [--limit N]

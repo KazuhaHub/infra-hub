@@ -41,10 +41,18 @@ func (c *cli) newServe() *cobra.Command {
 	}
 }
 
-// serve runs the hub until ctx ends.
-func serve(ctx context.Context, cfg config.Config) error {
+// checkListen refuses a config the hub could not serve with: https is its only listener.
+func checkListen(cfg config.Config) error {
 	if cfg.HTTPS.Listen == "" {
 		return errors.New("https.listen is not set, so the hub would serve nothing")
+	}
+	return nil
+}
+
+// serve runs the hub until ctx ends.
+func serve(ctx context.Context, cfg config.Config) error {
+	if err := checkListen(cfg); err != nil {
+		return err
 	}
 	key, err := hubkey.Read(cfg.HTTPS.Key)
 	var pin string

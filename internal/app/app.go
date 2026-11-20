@@ -116,7 +116,7 @@ func (c *cli) newRoot() *cobra.Command {
 	root.PersistentFlags().String("config", defaultConfig, "path to the hub's config file")
 	root.PersistentFlags().String("log-format", "text", "log format on stderr: text or json")
 	root.PersistentFlags().String("log-level", "info", "log level: debug, info, warn or error")
-	root.AddCommand(c.newServe(), c.newStatus(), c.newIPList(), c.newKey(), c.newToken(), c.newVersion(), c.newLegacyIPListAccept(), c.newLegacyIPListHistory())
+	root.AddCommand(c.newServe(), c.newCheckConfig(), c.newStatus(), c.newIPList(), c.newKey(), c.newToken(), c.newVersion(), c.newLegacyIPListAccept(), c.newLegacyIPListHistory())
 	return root
 }
 

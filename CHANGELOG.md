@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.11.0
+
+### Added
+
+- `infra-hub check-config [--config file]`: loads and validates the config the same way `serve` does and reads the
+  existing state file (read-only), then exits without starting anything. It does not open the identity key or other
+  files that exist only inside the service, and uses no network. Exit `0` with a one-line summary, or `1` with the
+  error on stderr; warnings (removed keys) go to stderr. It lets a new release be tested before it replaces the running
+  one.
+
 ## v0.10.0
 
 The SSH server is removed. The hub is its HTTPS server: bundle, certificates, IP lists, challenge and report.
