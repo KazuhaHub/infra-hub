@@ -256,6 +256,10 @@ func (c *cli) newRun() *cobra.Command {
 			defer stop()
 			if once, _ := cmd.Flags().GetBool("once"); once {
 				o, err := a.Cycle(ctx)
+				if _, serr := os.Lstat(agent.RestartFile(cfg.StateDir)); serr == nil {
+					slog.Warn("the configuration run asked for a restart of the agent; run --once does not restart, restart infra-agent.service",
+						"file", agent.RestartFile(cfg.StateDir))
+				}
 				if errors.Is(err, agent.ErrInterrupted) {
 					return &exitError{code: ExitNotReady, err: err}
 				}
@@ -267,6 +271,7 @@ func (c *cli) newRun() *cobra.Command {
 			versionInfo := version.Version
 			a.Out = c.stderr
 			startupLog(cfg, versionInfo)
+			// Loop also returns on a restart request: exit 0, and systemd (Restart=always) starts the agent again.
 			a.Loop(ctx)
 			return nil
 		},

@@ -467,7 +467,7 @@ func TestApplyKillsTheWholeProcessGroup(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	err := Apply(ctx, stub, rel, "web1", "/age", io.Discard)
+	err := Apply(ctx, stub, rel, "web1", "/age", "/restart", io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "stopped") {
 		t.Fatalf("err %v", err)
 	}
@@ -707,4 +707,98 @@ func newTrue(t *testing.T) *exec.Cmd {
 	cmd := exec.Command("true")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return cmd
+}
+
+func TestApplyEnvPassesTheRestartFile(t *testing.T) {
+	env := applyEnv([]string{"PATH=/bin", RestartFileEnv + "=/inherited", "INFRA_AGENT_TOKEN=x", "SOPS_AGE_KEY_FILE=/old"}, "/age", "/state/restart-requested")
+	want := []string{"PATH=/bin", "SOPS_AGE_KEY_FILE=/age", RestartFileEnv + "=/state/restart-requested"}
+	if strings.Join(env, "\n") != strings.Join(want, "\n") {
+		t.Errorf("env %q", env)
+	}
+	if RestartFile("/var/lib/infra-agent") != "/var/lib/infra-agent/restart-requested" {
+		t.Error(RestartFile("/var/lib/infra-agent"))
+	}
+}
+
+// A configuration run that changes the agent (binary, settings or unit) must not restart the service from inside its own
+// ansible: it creates the restart request file, and the loop exits after the cycle, once the result is saved and reported.
+func TestLoopExitsOnARestartRequest(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	p := w.Publish(agenttest.Options{})
+	a, _ := newAgent(t, w, ModeApply, hub)
+	a.Cfg.Interval = 100 * time.Millisecond
+	seen := filepath.Join(w.Dir, "seen-restart-file")
+	stub := filepath.Join(w.Dir, "ansible-requests-restart")
+	os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s' \"$"+RestartFileEnv+"\" > "+seen+"\ntouch \"$"+RestartFileEnv+"\"\n"), 0o755)
+	a.Ansible = stub
+
+	done := make(chan bool, 1)
+	go func() { done <- a.Loop(context.Background()) }()
+	var restart bool
+	select {
+	case restart = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Loop did not return after the restart request")
+	}
+	if !restart {
+		t.Fatal("Loop returned false")
+	}
+	if got, _ := os.ReadFile(seen); string(got) != RestartFile(w.StateDir) {
+		t.Errorf("ansible saw %s=%q", RestartFileEnv, got)
+	}
+	if _, err := os.Lstat(RestartFile(w.StateDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the request was not removed: %v", err)
+	}
+	st := mustState(t, w)
+	if st.LastResult != ResultOK || st.Applied == nil || st.Applied.Commit != p.Commit {
+		t.Errorf("the cycle before the restart was not recorded: %+v", st)
+	}
+	if rep, ok := hub.Report(t); !ok || rep.Result != "ok" {
+		t.Errorf("the cycle before the restart was not reported: %+v", rep)
+	}
+}
+
+func TestLoopIgnoresARequestItCannotRemove(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{})
+	a, _ := newAgent(t, w, ModeVerify, hub)
+	a.Cfg.Interval = 50 * time.Millisecond
+	// A non-empty directory exists but cannot be removed: honouring it would exit after every cycle.
+	os.MkdirAll(filepath.Join(RestartFile(w.StateDir), "x"), 0o700)
+	if a.takeRestartRequest() {
+		t.Fatal("an unremovable request was honoured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+	if a.Loop(ctx) {
+		t.Error("Loop returned for a restart")
+	}
+	if st := mustState(t, w); st.LastCycle == nil {
+		t.Error("no cycle ran")
+	}
+}
+
+// A request left over from before the process started is not one for it: the loop removes it and keeps running (verify
+// mode, so no ansible run creates a new one).
+func TestLoopRemovesAStaleRequestAtStart(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{})
+	a, _ := newAgent(t, w, ModeVerify, hub)
+	a.Cfg.Interval = 50 * time.Millisecond
+	os.MkdirAll(w.StateDir, 0o700)
+	os.WriteFile(RestartFile(w.StateDir), nil, 0o600)
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	if a.Loop(ctx) {
+		t.Fatal("Loop returned for a stale request")
+	}
+	if _, err := os.Lstat(RestartFile(w.StateDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the stale request is still there: %v", err)
+	}
+	if st := mustState(t, w); st.LastCycle == nil {
+		t.Error("no cycle ran")
+	}
 }

@@ -87,7 +87,8 @@ that a fleet that starts together does not call the hubs together.
    stuck. For that reason one ansible run is limited to 25 minutes here, inside `LOCK_MAX`; keep it so if either
    side changes. If it is still held after that the result is `failed` with the message `another run holds
    /var/lib/infra/lock`. Then, in `<release>/infra`, `ansible-playbook -i inventory/hosts.yml --limit <host> site.yml`
-   with `SOPS_AGE_KEY_FILE=<age key>`, in its own process group. The output goes to stderr, which is the journal. A
+   with `SOPS_AGE_KEY_FILE=<age key>` and `INFRA_AGENT_RESTART_FILE=<state dir>/restart-requested` (see "Restarting
+   from a configuration run"), in its own process group. The output goes to stderr, which is the journal. A
    non-zero exit is `failed`, and the applied state does not change, so the next cycle tries again (also when the hub
    answers `304`: the extracted release is applied again). On success the applied commit, the statement time of that
    bundle and the time of the apply are written atomically. Like infra-pull, the same commit is applied again when the
@@ -173,12 +174,27 @@ extracts what CI signed, with no effect on the host. `apply` also runs ansible. 
 `infra-pull.timer` on that host (that gate is landed separately in infra); the lock only keeps two runs that overlap
 apart, it does not make two owners of one host safe. Switching the mode needs a restart of the service; the first cycle in apply mode applies the bundle that was already verified.
 
+## Restarting from a configuration run
+
+A run that changes the agent itself (a new binary, `agent.env` or the unit) must not restart `infra-agent.service`
+from inside the run: systemd would stop the agent and kill its ansible halfway. Instead the playbook creates the file
+named by `INFRA_AGENT_RESTART_FILE` (only set when the agent runs ansible; under infra-pull or by hand the variable is
+absent and the playbook restarts the service as usual). A playbook that changes the unit still runs
+`systemctl daemon-reload` in the same run, or the restart uses the old unit. After the cycle (its result saved and
+reported, unless that failed) the agent removes the file and exits with status 0, and the unit's `Restart=always` starts
+it again with the new binary, settings and unit. The unit must keep `Restart=always`: with `Restart=on-failure` an exit 0
+is final and the agent stays down. `run --once` does not restart: it logs that a restart was asked for and leaves the
+file, which the service removes when it starts. A request that is still there when the agent starts is removed (the new process already runs what was asked
+for). A request that cannot be removed is ignored with an error in the journal, so the agent does not exit after
+every cycle.
+
 ## State
 
 ```
 /var/lib/infra-agent/            0700, owned by the user that runs the agent (root)
   state.json                     0600, written atomically (apiVersion v1)
   lock                           flock; held by `run` for its whole life, so `run --once` and the daemon never overlap
+  restart-requested              created by a configuration run to ask for a restart; removed by the agent
   releases/<commit>/infra/...    the newest three extracted releases
 ```
 

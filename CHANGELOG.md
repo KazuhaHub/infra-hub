@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.0
+
+### Added
+
+- infra-agent: restart request. ansible runs with `INFRA_AGENT_RESTART_FILE=<state dir>/restart-requested`; a playbook
+  that changes the agent (binary, settings, unit) creates that file instead of restarting the service from inside its
+  own run. After the cycle (result saved and reported) the agent removes the file and exits 0 so that systemd starts it
+  again; the unit must keep `Restart=always`. A stale request is removed at startup; one that cannot be removed is
+  ignored. Needed before a host runs the agent in apply mode. See docs/agent.md, "Restarting from a configuration run".
+
 ## v0.6.0
 
 ### Added

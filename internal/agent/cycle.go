@@ -320,7 +320,7 @@ func (a *Agent) decide(ctx context.Context, st *State, served *Hub, target strin
 	}
 	defer removeSince(since)
 	slog.Info("applying", "host", cfg.Host, "commit", target)
-	if err := Apply(ctx, a.Ansible, ReleaseDir(cfg.StateDir, target), cfg.Host, cfg.AgeKey, a.Out); err != nil {
+	if err := Apply(ctx, a.Ansible, ReleaseDir(cfg.StateDir, target), cfg.Host, cfg.AgeKey, RestartFile(cfg.StateDir), a.Out); err != nil {
 		slog.Error("apply failed", "host", cfg.Host, "commit", target, "err", err)
 		o.Result, o.Message = ResultFailed, fmt.Sprintf("apply of %s failed: %v", short(target), err)
 		return o
@@ -470,26 +470,49 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// Loop runs cycles until ctx ends, waiting Interval (plus or minus 10 %) between them. The first cycle starts after a
-// random delay of up to min(Interval, 60 s), so a fleet that restarts together does not call the hubs together. The caller
-// holds the lock.
-func (a *Agent) Loop(ctx context.Context) {
+// Loop runs cycles until ctx ends or a configuration run asks for a restart, waiting Interval (plus or minus 10 %)
+// between them. The first cycle starts after a random delay of up to min(Interval, 60 s), so a fleet that restarts
+// together does not call the hubs together. The caller holds the lock. It returns true when it stopped for a restart
+// request: the caller then exits and systemd starts the new binary, settings and unit.
+func (a *Agent) Loop(ctx context.Context) bool {
+	// This process already runs whatever a request left before it started asked for.
+	if err := os.Remove(RestartFile(a.Cfg.StateDir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("cannot remove the restart request", "err", err)
+	}
 	first := min(a.Cfg.Interval, time.Minute)
 	select {
 	case <-ctx.Done():
-		return
+		return false
 	case <-time.After(time.Duration(rand.Float64() * float64(first))):
 	}
 	for {
 		if _, err := a.Cycle(ctx); err != nil && ctx.Err() == nil {
 			slog.Error("cycle failed", "err", err)
 		}
+		if ctx.Err() == nil && a.takeRestartRequest() {
+			return true
+		}
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-time.After(Jitter(a.Cfg.Interval)):
 		}
 	}
+}
+
+// takeRestartRequest reports whether the restart request file exists and removes it. A file that cannot be removed is
+// not honoured: the agent would otherwise exit again after every cycle.
+func (a *Agent) takeRestartRequest() bool {
+	p := RestartFile(a.Cfg.StateDir)
+	if _, err := os.Lstat(p); err != nil {
+		return false
+	}
+	if err := os.Remove(p); err != nil {
+		slog.Error("restart requested, but the request cannot be removed; not restarting", "path", p, "err", err)
+		return false
+	}
+	slog.Info("restarting: the configuration run asked for it (new binary, settings or unit)", "host", a.Cfg.Host)
+	return true
 }
 
 // Jitter is d with a random difference of up to 10 %.
