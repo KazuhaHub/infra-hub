@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"filippo.io/age"
 	"filippo.io/age/armor"
 
+	"github.com/KazuhaHub/infra-hub/internal/bundle"
 	"github.com/KazuhaHub/infra-hub/internal/hubtrust"
 	"github.com/KazuhaHub/infra-hub/internal/logx"
 )
@@ -140,17 +142,25 @@ func (h *Hub) Health(ctx context.Context) (string, error) {
 	return doc.Status, nil
 }
 
-// Bundle fetches the encrypted bundle for host. etag is the commit last verified ("" for none). On a 200 the body is
+// FormatHeader is the request header that asks for archive format 2 (the bundle.sigstore.json member); the same name as
+// on the hub's side (httpsapi.FormatHeader).
+const FormatHeader = "X-Infra-Bundle-Format"
+
+// Bundle fetches the encrypted bundle for host. etag is the commit last verified ("" for none). format 2 asks for the
+// archive that may hold bundle.sigstore.json; format 1 sends no header and gets the three files. On a 200 the body is
 // handed to consume as a stream capped at MaxResponse bytes: nothing buffers the whole ciphertext. A failure of the
 // connection while consume reads is a hub error even if consume reports it as a bad bundle. notModified is true for a
 // 304, which is only believable when an If-None-Match was sent and the hub's ETag names the commit that was sent.
-func (h *Hub) Bundle(ctx context.Context, host, etag string, consume func(io.Reader) error) (notModified bool, err error) {
+func (h *Hub) Bundle(ctx context.Context, host, etag string, format int, consume func(io.Reader) error) (notModified bool, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.URL+"/v1/bundle/"+url.PathEscape(host), nil)
 	if err != nil {
 		return false, err
 	}
 	if etag != "" {
 		req.Header.Set("If-None-Match", `"`+etag+`"`)
+	}
+	if format >= bundle.Format2 {
+		req.Header.Set(FormatHeader, strconv.Itoa(bundle.Format2))
 	}
 	req.Header.Set("User-Agent", "infra-agent")
 	resp, err := h.client.Do(req)

@@ -17,8 +17,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sigstore/sigstore-go/pkg/root"
+
 	"github.com/KazuhaHub/infra-hub/internal/bundle"
 	"github.com/KazuhaHub/infra-hub/internal/githubapp"
+	"github.com/KazuhaHub/infra-hub/internal/sigstorever"
 )
 
 // Results of a cycle (and of its report).
@@ -57,6 +60,17 @@ type Agent struct {
 	ghMu     sync.Mutex
 	ghSource *githubapp.Source // the GitHub App credential, made on first use
 
+	// SigstoreRoot is the trusted material for Sigstore verification; nil means the root embedded in the binary. Only
+	// tests set it.
+	SigstoreRoot root.TrustedMaterial
+	// SigstoreTUF keeps the Sigstore trusted root current through TUF (refresh at most daily, cached in the state
+	// directory; embedded root as the last resort). Nil means the embedded root only; infra-agent sets it in the
+	// signature modes that need it.
+	SigstoreTUF *sigstorever.Manager
+	// sigWarn is a Sigstore signature that failed while the ssh signature was accepted (either mode), for the report.
+	sigWarn string
+	// rootNote is a note about the Sigstore trusted root (the embedded fallback) for the report.
+	rootNote string
 	// SSHKeygen and Ansible are the programs to run (defaults ssh-keygen and ansible-playbook, found through PATH).
 	SSHKeygen, Ansible string
 	// InfraLock and InfraApplied are infra-pull's lock and applied record; LockTimeout bounds the wait for the lock.
@@ -151,7 +165,7 @@ type rejection struct {
 }
 
 func (r rejection) note() string {
-	return fmt.Sprintf("hub %s served a rejected bundle: %s", r.hub.URL, truncate(r.reason, 150))
+	return fmt.Sprintf("hub %s served a rejected bundle: %s", r.hub.URL, truncate(r.reason, 300))
 }
 
 // Cycle runs one fetch, verify, extract, apply and report. The error is for faults of the agent itself (the state
@@ -166,6 +180,8 @@ func (a *Agent) Cycle(ctx context.Context) (Outcome, error) {
 		return Outcome{}, err
 	}
 	a.floor = 0
+	a.sigWarn = ""
+	a.rootNote = ""
 	var o Outcome
 	var served *Hub
 	var rejs []rejection
@@ -190,6 +206,24 @@ func (a *Agent) Cycle(ctx context.Context) (Outcome, error) {
 		// Stopped from outside: what the cycle found is not a result, and the last real one stays in the state.
 		slog.Info("interrupted", "host", a.Cfg.Host, "result", o.Result)
 		return o, fmt.Errorf("%w: %v", ErrInterrupted, ctx.Err())
+	}
+	if a.sigWarn != "" {
+		st.SigstoreReason = a.sigWarn
+	}
+	if st.Verified != nil && st.Verified.Signature == SigSigstore {
+		st.SigstoreReason = ""
+	}
+	if cfg := a.Cfg; cfg.Signature == SigEither && st.Verified != nil && st.Verified.Signature != SigSigstore && o.Result != ResultRejected {
+		// Every report says that the current bundle rests on the ssh signature alone, so that the hub's alerts, which see
+		// only the latest report of a host, notice it.
+		reason := st.SigstoreReason
+		if reason == "" {
+			reason = "no Sigstore signature seen"
+		}
+		o.Message += "; sigstore: not verified (" + truncate(reason, 120) + ")"
+	}
+	if a.rootNote != "" {
+		o.Message += "; " + a.rootNote
 	}
 	o.Message = truncate(o.Message, MaxMessage)
 	st.LastResult, st.LastMessage, st.LastHub = o.Result, o.Message, o.Hub
@@ -222,6 +256,11 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 		if _, err := os.Stat(ReleaseDir(cfg.StateDir, st.Verified.Commit)); err == nil {
 			etag = st.Verified.Commit
 		}
+		// A bundle that was verified with the ssh signature does not satisfy sigstore mode: ask again, so that the hub
+		// sends the Sigstore signature of the same commit.
+		if cfg.Signature == SigSigstore && st.Verified.Signature != SigSigstore {
+			etag = ""
+		}
 	}
 	var (
 		served    *Hub
@@ -230,12 +269,16 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 		rejs      []rejection
 		hubErrs   int
 	)
+	format := bundle.Format1
+	if cfg.WantsSigstore() {
+		format = bundle.Format2
+	}
 	for _, hub := range a.Hubs {
 		if ctx.Err() != nil {
 			break
 		}
 		var status bundleStatus
-		notModified, err := hub.Bundle(ctx, cfg.Host, etag, func(r io.Reader) error {
+		notModified, err := hub.Bundle(ctx, cfg.Host, etag, format, func(r io.Reader) error {
 			var err error
 			_, status, err = a.accept(ctx, st, r)
 			return err
@@ -361,6 +404,13 @@ func (a *Agent) decide(ctx context.Context, st *State, source, target string, ne
 		o.Result, o.Message = ResultUnchanged, fmt.Sprintf("%s is applied", short(target))
 		return o
 	}
+	// In sigstore mode only a bundle whose Sigstore signature was verified is applied, a re-apply included: a bundle that
+	// was verified with the ssh signature, before the mode was switched, waits until it has been seen with its Sigstore
+	// signature.
+	if cfg.Signature == SigSigstore && st.Verified != nil && st.Verified.Commit == target && st.Verified.Signature != SigSigstore {
+		o.Result, o.Message = ResultRejected, fmt.Sprintf("refusing to apply %s: it was verified with the %s signature, not the Sigstore signature that this host requires", short(target), orSSH(st.Verified.Signature))
+		return o
+	}
 	// infra-pull and the bootstrap hold this lock while they apply; two runs of ansible on one host must not overlap.
 	lock, err := LockFile(ctx, a.InfraLock, a.LockTimeout)
 	if err != nil {
@@ -387,7 +437,7 @@ func (a *Agent) decide(ctx context.Context, st *State, source, target string, ne
 		return o
 	}
 	// The applied record takes the statement time of the verified bundle it applied (target is always that one).
-	rec := Record{Commit: target, Time: st.Verified.Time, At: a.now()}
+	rec := Record{Commit: target, Time: st.Verified.Time, At: a.now(), Signature: st.Verified.Signature}
 	st.Applied = &rec
 	if err := st.Save(cfg.StateDir); err != nil { // before anything else: what was applied must not be forgotten
 		slog.Error("cannot record the applied bundle", "err", err)
@@ -430,7 +480,8 @@ func (a *Agent) accept(ctx context.Context, st *State, body io.Reader) (bundle.S
 // acceptFiles verifies and extracts the three files of a bundle (from a hub, decrypted, or from GitHub) and applies the
 // forward-only rule. The checks are the same for both sources.
 func (a *Agent) acceptFiles(ctx context.Context, st *State, files bundle.Files) (bundle.Statement, bundleStatus, error) {
-	if err := VerifySignature(ctx, a.SSHKeygen, a.Cfg.Signers, a.Cfg.StateDir, files.Statement, files.Signature); err != nil {
+	sig, err := a.verifyFiles(ctx, files)
+	if err != nil {
 		return bundle.Statement{}, 0, local(err)
 	}
 	stmt, err := CheckStatement(files.Statement, a.Cfg.Repo, files.Tarball)
@@ -458,7 +509,12 @@ func (a *Agent) acceptFiles(ctx context.Context, st *State, files bundle.Files) 
 			}
 		}
 		if st.Verified == nil { // the state had only an applied record: the verified one is this bundle
-			st.Verified = &Record{Commit: stmt.Commit, Time: time.Unix(stmt.Time, 0).UTC(), At: a.now()}
+			st.Verified = &Record{Commit: stmt.Commit, Time: time.Unix(stmt.Time, 0).UTC(), At: a.now(), Signature: sig}
+		} else if st.Verified.Commit == stmt.Commit && st.Verified.Signature != sig && (sig == SigSigstore || st.Verified.Signature == "") {
+			st.Verified.Signature = sig // the same bundle, now seen with a signature that counts for more
+			if err := st.Save(a.Cfg.StateDir); err != nil {
+				return stmt, 0, local(fmt.Errorf("write state: %w", err))
+			}
 		}
 		return stmt, statusSame, nil
 	}
@@ -469,7 +525,7 @@ func (a *Agent) acceptFiles(ctx context.Context, st *State, files bundle.Files) 
 	if _, err := Extract(a.Cfg.StateDir, stmt.Commit, files.Tarball); err != nil {
 		return stmt, 0, local(err)
 	}
-	st.Verified = &Record{Commit: stmt.Commit, Time: time.Unix(stmt.Time, 0).UTC(), At: a.now()}
+	st.Verified = &Record{Commit: stmt.Commit, Time: time.Unix(stmt.Time, 0).UTC(), At: a.now(), Signature: sig}
 	if err := st.Save(a.Cfg.StateDir); err != nil {
 		return stmt, 0, local(fmt.Errorf("write state: %w", err))
 	}
@@ -632,4 +688,11 @@ func (a *Agent) takeRestartRequest() bool {
 // Jitter is d with a random difference of up to 10 %.
 func Jitter(d time.Duration) time.Duration {
 	return d + time.Duration((rand.Float64()*0.2-0.1)*float64(d))
+}
+
+func orSSH(sig string) string {
+	if sig == "" {
+		return SigSSH
+	}
+	return sig
 }

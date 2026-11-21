@@ -9,14 +9,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"filippo.io/age"
+	"github.com/sigstore/sigstore-go/pkg/root"
 
 	"github.com/KazuhaHub/infra-hub/internal/bundle"
+	"github.com/KazuhaHub/infra-hub/internal/sigstorever"
 )
 
 // Signature parameters of the contract (docs/bundle.md).
@@ -36,11 +40,12 @@ func (e *RejectError) Error() string { return e.Reason }
 
 func rejectf(format string, a ...any) error { return &RejectError{Reason: fmt.Sprintf(format, a...)} }
 
-// maxPlain bounds the decrypted archive: three members, their headers and the end marker.
-const maxPlain = bundle.MaxTarball + bundle.MaxStatement + bundle.MaxSignature + 16<<10
+// maxPlain bounds the decrypted archive: four members, their headers and the end marker.
+const maxPlain = bundle.MaxTarball + bundle.MaxStatement + bundle.MaxSignature + bundle.MaxSigstore + 16<<10
 
-// OpenBundle decrypts the hub's answer and returns the three files. The archive must hold exactly bundle, bundle.sig
-// and bundle.tar.gz, in that order, each a regular file within its limit, and nothing else.
+// OpenBundle decrypts the hub's answer and returns the files. The archive must hold bundle, bundle.sig and
+// bundle.tar.gz, in that order, and then optionally bundle.sigstore.json (a hub answers with it only to a request for
+// format 2), each a regular file within its limit, and nothing else.
 func OpenBundle(ciphertext io.Reader, id *Identity) (bundle.Files, error) {
 	var f bundle.Files
 	pr, err := age.Decrypt(ciphertext, id.ids...)
@@ -78,8 +83,26 @@ func OpenBundle(ciphertext io.Reader, id *Identity) (bundle.Files, error) {
 		}
 		*m.dst = data
 	}
-	if _, err := tr.Next(); err != io.EOF {
-		return f, rejectf("the bundle archive has more members than the three it must hold")
+	h, err := tr.Next()
+	if err == nil {
+		if h.Name != bundle.SigstoreName {
+			return f, rejectf("the bundle archive has member %q where only %s may follow the three files", h.Name, bundle.SigstoreName)
+		}
+		if h.Typeflag != tar.TypeReg {
+			return f, rejectf("bundle member %s is not a regular file", h.Name)
+		}
+		if h.Size < 0 || h.Size > bundle.MaxSigstore {
+			return f, rejectf("bundle member %s is larger than %d bytes", h.Name, bundle.MaxSigstore)
+		}
+		data, rerr := io.ReadAll(io.LimitReader(tr, bundle.MaxSigstore+1))
+		if rerr != nil || int64(len(data)) != h.Size {
+			return f, rejectf("bundle member %s cannot be read: %v", h.Name, plainErr(rerr))
+		}
+		f.Sigstore = data
+		_, err = tr.Next()
+	}
+	if err != io.EOF {
+		return f, rejectf("the bundle archive has more members than it may hold")
 	}
 	// Read to the end: age authenticates the stream only when its last chunk has been read, and anything after the
 	// archive's end marker must be padding.
@@ -120,6 +143,102 @@ func (c *capReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.left -= int64(n)
 	return n, err
+}
+
+// sigstoreMaterial is the trusted material for Sigstore verification: the injected one (tests), the root the TUF manager
+// keeps current, or the embedded root.
+func (a *Agent) sigstoreMaterial(ctx context.Context) (root.TrustedMaterial, error) {
+	if a.SigstoreRoot != nil {
+		return a.SigstoreRoot, nil
+	}
+	if a.SigstoreTUF != nil {
+		tr, info, err := a.SigstoreTUF.Root(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if info.Fallback {
+			a.rootNote = "sigstore root: " + sigstorever.InfoText(info)
+			if a.Cfg.Signature == SigSigstore {
+				a.rootNote = "WARNING " + a.rootNote
+			}
+			slog.Warn("the Sigstore trusted root is the embedded one", "note", a.rootNote)
+		}
+		return tr, nil
+	}
+	tr, err := sigstorever.EmbeddedRoot()
+	if err != nil {
+		return nil, err
+	}
+	return tr, nil
+}
+
+// verifySigstore checks bundle.sigstore.json against the statement and the identity of the infra workflow.
+func (a *Agent) verifySigstore(ctx context.Context, files bundle.Files) error {
+	if len(files.Sigstore) == 0 {
+		return rejectf("the bundle has no %s (the Sigstore signature)", bundle.SigstoreName)
+	}
+	tm, err := a.sigstoreMaterial(ctx)
+	if err != nil {
+		return err // this machine's fault: not a reason to call the bundle bad
+	}
+	pol := sigstorever.Policy{Repo: a.Cfg.Repo, RepoID: a.Cfg.SigstoreRepoID, OwnerID: a.Cfg.SigstoreOwnerID,
+		Relaxed: a.SigstoreRoot != nil} // only a test root is relaxed
+	if st, err := bundle.ParseStatement(files.Statement); err == nil {
+		pol.Commit = st.Commit // the workflow run that signed must be the one that built this commit
+	}
+	res, err := sigstorever.Verify(tm, files.Sigstore, files.Statement, pol)
+	if err != nil {
+		return rejectf("the Sigstore signature in %s does not verify: %v", bundle.SigstoreName, err)
+	}
+	slog.Debug("Sigstore signature verified", "identity", res.Identity, "issuer", res.Issuer, "loggedAt", res.Time)
+	return nil
+}
+
+// verifyFiles applies the signature mode and returns the signature that verified the statement (SigSSH or
+// SigSigstore). In either mode a Sigstore signature that is there is tried first, and a bad one does not stop a good ssh
+// signature from being accepted.
+func (a *Agent) verifyFiles(ctx context.Context, files bundle.Files) (string, error) {
+	sshCheck := func() error {
+		return VerifySignature(ctx, a.SSHKeygen, a.Cfg.Signers, a.Cfg.StateDir, files.Statement, files.Signature)
+	}
+	switch a.Cfg.Signature {
+	case SigSigstore:
+		if err := a.verifySigstore(ctx, files); err != nil {
+			return "", err
+		}
+		return SigSigstore, nil
+	case SigEither:
+		var sErr error
+		if len(files.Sigstore) > 0 {
+			if sErr = a.verifySigstore(ctx, files); sErr == nil {
+				return SigSigstore, nil
+			}
+			var rj *RejectError
+			if !errors.As(sErr, &rj) {
+				return "", sErr
+			}
+		}
+		err := sshCheck()
+		if err == nil {
+			if sErr == nil { // no Sigstore file at all
+				a.sigWarn = "no " + bundle.SigstoreName + " in the bundle"
+			}
+			if sErr != nil {
+				slog.Warn("the Sigstore signature is bad, accepted the ssh signature", "err", sErr)
+				a.sigWarn = strings.TrimPrefix(sErr.Error(), "the Sigstore signature in "+bundle.SigstoreName+" ")
+			}
+			return SigSSH, nil
+		}
+		var rj *RejectError
+		if sErr != nil && errors.As(err, &rj) {
+			return "", rejectf("%s; %s", sErr.Error(), rj.Reason)
+		}
+		return "", err
+	}
+	if err := sshCheck(); err != nil {
+		return "", err
+	}
+	return SigSSH, nil
 }
 
 // VerifySignature runs `ssh-keygen -Y verify` (the tool infra-pull uses) for the statement and its signature against

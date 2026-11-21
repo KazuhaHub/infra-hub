@@ -50,6 +50,8 @@ type Record struct {
 	Commit string    `json:"commit"`
 	Time   time.Time `json:"time"` // the statement time
 	At     time.Time `json:"at"`   // when it was applied or verified
+	// Signature is what verified the statement: "ssh" or "sigstore" ("" in a state written by an older agent: ssh).
+	Signature string `json:"signature,omitempty"`
 }
 
 // State is what survives between cycles, in <state dir>/state.json.
@@ -59,11 +61,14 @@ type State struct {
 	Applied *Record `json:"applied,omitempty"`
 	// Verified is the newest bundle that passed every check and was extracted. It is where the forward-only rule
 	// starts, and what a 304 refers to.
-	Verified    *Record    `json:"verified,omitempty"`
-	LastResult  string     `json:"lastResult,omitempty"`
-	LastMessage string     `json:"lastMessage,omitempty"`
-	LastHub     string     `json:"lastHub,omitempty"`
-	LastCycle   *time.Time `json:"lastCycle,omitempty"`
+	Verified    *Record `json:"verified,omitempty"`
+	LastResult  string  `json:"lastResult,omitempty"`
+	LastMessage string  `json:"lastMessage,omitempty"`
+	LastHub     string  `json:"lastHub,omitempty"`
+	// SigstoreReason is why the current bundle was not verified with Sigstore in either mode (last reason seen); it
+	// goes into every report while the verified bundle's signature is ssh.
+	SigstoreReason string     `json:"sigstoreReason,omitempty"`
+	LastCycle      *time.Time `json:"lastCycle,omitempty"`
 }
 
 // statePath is the state file in dir.

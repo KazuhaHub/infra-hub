@@ -197,7 +197,7 @@ func bundleBody(t *testing.T, w *agenttest.World) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, err := bundle.Archive(l.Files, time.Unix(l.Statement.Time, 0))
+	plain, err := bundle.Archive(l.Files, time.Unix(l.Statement.Time, 0), bundle.Format1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestUnbelievable304IsAHubError(t *testing.T) {
 				rw.WriteHeader(http.StatusNotModified)
 			})
 			h, _ := NewHub(url, []string{pin})
-			if _, err := h.Bundle(context.Background(), agenttest.Host, p.Commit, func(io.Reader) error { return nil }); err == nil {
+			if _, err := h.Bundle(context.Background(), agenttest.Host, p.Commit, 1, func(io.Reader) error { return nil }); err == nil {
 				t.Error("accepted")
 			}
 		})

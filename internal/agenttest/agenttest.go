@@ -29,6 +29,7 @@ import (
 	"github.com/KazuhaHub/infra-hub/internal/httpsapi"
 	"github.com/KazuhaHub/infra-hub/internal/hubkey"
 	"github.com/KazuhaHub/infra-hub/internal/jointoken"
+	"github.com/KazuhaHub/infra-hub/internal/sigstorever/sigstoretest"
 	"github.com/KazuhaHub/infra-hub/internal/state"
 	"github.com/KazuhaHub/infra-hub/internal/testutil"
 )
@@ -52,7 +53,10 @@ type World struct {
 	otherKey     string
 	infra, attst string // work trees
 	n            int
-	published    map[string][3][]byte // commit -> statement, signature, tarball, for Republish
+	published    map[string][4][]byte // commit -> statement, signature, tarball, sigstore bundle, for Republish
+	// Sigstore is the throwaway Sigstore that signs the bundles whose Options ask for it; an agent under test takes its
+	// TrustedMaterial() as SigstoreRoot.
+	Sigstore *sigstoretest.Fake
 	// Certs, when set before a hub is started, is what the hub serves under /v1/cert.
 	Certs certs.CertSource
 }
@@ -85,6 +89,12 @@ type Options struct {
 	WrongHash bool              // the statement carries the hash of other bytes
 	Repo      string            // statement repo (default KazuhaHub/infra)
 	Tarball   []byte            // use these bytes as bundle.tar.gz instead of git archive (signed all the same)
+	// Sigstore, when set, adds bundle.sigstore.json: a Sigstore signature over the statement with these options.
+	Sigstore *sigstoretest.Options
+	// SigstoreOver is signed instead of the statement (a digest that does not match).
+	SigstoreOver []byte
+	// SigstoreRaw is published as bundle.sigstore.json as it is (it wins over Sigstore).
+	SigstoreRaw []byte
 }
 
 // Published is what Publish made.
@@ -118,6 +128,7 @@ func NewWorld(t *testing.T) *World {
 		t.Fatal(err)
 	}
 	w.AgeID = id
+	w.Sigstore = sigstoretest.New(t)
 	w.AgeKeyPath = filepath.Join(d, "age.key")
 	must(t, os.WriteFile(w.AgeKeyPath, []byte("# created: test\n"+id.String()+"\n"), 0o600))
 	w.signKey, w.otherKey = filepath.Join(d, "ci"), filepath.Join(d, "other")
@@ -150,7 +161,7 @@ func must(t *testing.T, err error) {
 	}
 }
 
-// Publish makes a new commit in the infra repository, builds its bundle and commits the three files to main-attestation.
+// Publish makes a new commit in the infra repository, builds its bundle and commits the files to main-attestation.
 func (w *World) Publish(o Options) Published {
 	t := w.T
 	t.Helper()
@@ -205,22 +216,35 @@ func (w *World) Publish(o Options) Published {
 	run(t, w.Dir, "ssh-keygen", nil, "-Y", "sign", "-n", ns, "-f", key, stmtPath)
 	sig, err := os.ReadFile(stmtPath + ".sig")
 	must(t, err)
-	must(t, os.WriteFile(filepath.Join(w.attst, "bundle"), []byte(stmt), 0o644))
-	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.sig"), sig, 0o644))
-	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.tar.gz"), tarball, 0o644))
-	if w.published == nil {
-		w.published = map[string][3][]byte{}
+	var sigstore []byte
+	switch {
+	case o.SigstoreRaw != nil:
+		sigstore = o.SigstoreRaw
+	case o.Sigstore != nil:
+		over := []byte(stmt)
+		if o.SigstoreOver != nil {
+			over = o.SigstoreOver
+		}
+		sigstore = w.Sigstore.Sign(over, *o.Sigstore)
 	}
-	w.published[commit] = [3][]byte{[]byte(stmt), sig, tarball}
-	w.commitAttestation([]byte(stmt), sig, tarball)
+	if w.published == nil {
+		w.published = map[string][4][]byte{}
+	}
+	w.published[commit] = [4][]byte{[]byte(stmt), sig, tarball, sigstore}
+	w.commitAttestation([]byte(stmt), sig, tarball, sigstore)
 	return Published{Commit: commit, Time: tm}
 }
 
-func (w *World) commitAttestation(stmt, sig, tarball []byte) {
+func (w *World) commitAttestation(stmt, sig, tarball, sigstore []byte) {
 	t := w.T
 	must(t, os.WriteFile(filepath.Join(w.attst, "bundle"), stmt, 0o644))
 	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.sig"), sig, 0o644))
 	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.tar.gz"), tarball, 0o644))
+	if sigstore != nil {
+		must(t, os.WriteFile(filepath.Join(w.attst, "bundle.sigstore.json"), sigstore, 0o644))
+	} else {
+		os.Remove(filepath.Join(w.attst, "bundle.sigstore.json"))
+	}
 	testutil.RunGit(t, w.attst, "add", "-A")
 	testutil.RunGit(t, w.attst, "commit", "-q", "--allow-empty", "-m", "attest")
 }
@@ -232,7 +256,7 @@ func (w *World) Republish(commit string) {
 	if !ok {
 		w.T.Fatalf("no bundle for %s", commit)
 	}
-	w.commitAttestation(f[0], f[1], f[2])
+	w.commitAttestation(f[0], f[1], f[2], f[3])
 }
 
 // StubRuns is how many times the ansible stub ran, and its log lines.

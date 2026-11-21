@@ -129,7 +129,7 @@ func FuzzParseStatement(f *testing.F) {
 func TestArchive(t *testing.T) {
 	f := Files{Statement: []byte(goodText()), Signature: []byte("sig"), Tarball: []byte("tarball bytes")}
 	mt := time.Unix(1790000000, 0)
-	data, err := Archive(f, mt)
+	data, err := Archive(f, mt, Format1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func attestationRepo(t *testing.T, files map[string]string) (gitDir, work string
 // commitFiles replaces the content of work with files and commits it.
 func commitFiles(t *testing.T, work string, files map[string]string) {
 	t.Helper()
-	for _, n := range []string{StatementName, SignatureName, TarballName} {
+	for _, n := range []string{StatementName, SignatureName, TarballName, SigstoreName} {
 		os.Remove(filepath.Join(work, n))
 	}
 	for n, c := range files {
@@ -228,7 +228,7 @@ func TestLoad(t *testing.T) {
 func TestArchiveErrorIsNoBundle(t *testing.T) {
 	f := Files{Statement: []byte("a"), Signature: []byte("b"), Tarball: []byte("c")}
 	for _, tm := range []time.Time{time.Unix(8589934592, 0), time.Unix(-1, 0)} {
-		if _, err := Archive(f, tm); !errors.Is(err, ErrNoBundle) {
+		if _, err := Archive(f, tm, Format1); !errors.Is(err, ErrNoBundle) {
 			t.Errorf("mtime %v: err = %v", tm, err)
 		}
 	}
@@ -248,5 +248,58 @@ func TestLoadStatementReadsOnlyTheStatement(t *testing.T) {
 	}
 	if _, err := LoadStatement(context.Background(), repo, tip, Limits{Statement: 5}); !errors.Is(err, ErrNoBundle) {
 		t.Errorf("statement over limit: %v", err)
+	}
+}
+
+func TestLoadReadsTheOptionalFourthFile(t *testing.T) {
+	files := map[string]string{"bundle": goodText(), "bundle.sig": "SIG", "bundle.tar.gz": "TARBALL"}
+	repo, _ := attestationRepo(t, files)
+	l, err := Load(context.Background(), repo, DefaultLimits)
+	if err != nil || l.Files.Sigstore != nil {
+		t.Fatalf("without the file: %v, %q", err, l.Files.Sigstore)
+	}
+	files["bundle.sigstore.json"] = `{"mediaType":"x"}`
+	repo, _ = attestationRepo(t, files)
+	l, err = Load(context.Background(), repo, DefaultLimits)
+	if err != nil || string(l.Files.Sigstore) != `{"mediaType":"x"}` {
+		t.Fatalf("with the file: %v, %q", err, l.Files.Sigstore)
+	}
+	// Over its limit, the file is left out and the bundle stays usable.
+	l, err = Load(context.Background(), repo, Limits{Tarball: MaxTarball, Statement: MaxStatement, Signature: MaxSignature, Sigstore: 5})
+	if err != nil || l.Files.Sigstore != nil {
+		t.Fatalf("over the limit: %v, %q", err, l.Files.Sigstore)
+	}
+}
+
+func TestArchiveFormats(t *testing.T) {
+	f := Files{Statement: []byte(goodText()), Signature: []byte("sig"), Tarball: []byte("tarball bytes"), Sigstore: []byte("{}")}
+	names := func(format int, f Files) string {
+		data, err := Archive(f, time.Unix(1790000000, 0), format)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		tr := tar.NewReader(bytes.NewReader(data))
+		for {
+			h, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, h.Name)
+		}
+		return strings.Join(out, ",")
+	}
+	if got := names(Format1, f); got != "bundle,bundle.sig,bundle.tar.gz" {
+		t.Errorf("format 1: %s", got)
+	}
+	if got := names(Format2, f); got != "bundle,bundle.sig,bundle.tar.gz,bundle.sigstore.json" {
+		t.Errorf("format 2: %s", got)
+	}
+	f.Sigstore = nil
+	if got := names(Format2, f); got != "bundle,bundle.sig,bundle.tar.gz" {
+		t.Errorf("format 2 without the file: %s", got)
 	}
 }

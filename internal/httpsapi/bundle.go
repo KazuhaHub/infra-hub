@@ -20,8 +20,11 @@ import (
 // maxCacheBytes bounds what is kept in memory for the current tip: the plain archive plus the encrypted copies.
 const maxCacheBytes = 256 << 20
 
-// Bundles serves GET /v1/bundle/<host>: the three files of the config bundle, read from the mirror's main-attestation
-// branch and age-encrypted to the host. The hub does not verify the signature or the hash; the agent does.
+// Bundles serves GET /v1/bundle/<host>: the files of the config bundle, read from the mirror's main-attestation
+// branch and age-encrypted to the host. By default the archive holds exactly the three files (what the first agents
+// accept and nothing else); a request with the header X-Infra-Bundle-Format: 2 gets the optional bundle.sigstore.json
+// as a fourth member when the branch has it, and the three files when it has not. The hub does not verify the signature
+// or the hash; the agent does.
 //
 // Only the current tip of main-attestation is ever held. Per tip the hub keeps the parsed statement (so an unchanged
 // poll is a 304 without reading the tarball), the plain ustar archive (built once and shared by all hosts), and the
@@ -42,10 +45,10 @@ type Bundles struct {
 }
 
 type tipState struct {
-	tip     string
-	stmt    *bundle.Statement
-	archive []byte            // plain ustar, built on the first full request
-	enc     map[string][]byte // ciphertext by host
+	tip      string
+	stmt     *bundle.Statement
+	archives map[int][]byte    // plain ustar by format, built on the first full request
+	enc      map[string][]byte // ciphertext by host and format (encKey)
 }
 
 func (b *Bundles) limits() bundle.Limits {
@@ -118,7 +121,7 @@ func (b *Bundles) wakeChan() <-chan struct{} {
 }
 
 // serve returns the commit of the current bundle and, unless ifNoneMatch names it, the ciphertext for host.
-func (b *Bundles) serve(ctx context.Context, host string, rcpt age.Recipient, ifNoneMatch string) (commit string, body []byte, notModified bool, err error) {
+func (b *Bundles) serve(ctx context.Context, host string, rcpt age.Recipient, ifNoneMatch string, format int) (commit string, body []byte, notModified bool, err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	c, err := b.tipLocked(ctx)
@@ -130,10 +133,12 @@ func (b *Bundles) serve(ctx context.Context, host string, rcpt age.Recipient, if
 	if ifNoneMatch != "" && etagMatches(ifNoneMatch, etagOf(commit)) {
 		return commit, nil, true, nil
 	}
-	if ct, ok := c.enc[host]; ok {
+	key := encKey(host, format)
+	if ct, ok := c.enc[key]; ok {
 		return commit, ct, false, nil
 	}
-	if c.archive == nil {
+	archive := c.archives[format]
+	if archive == nil {
 		l, err := bundle.LoadAt(ctx, b.Repo, tip, b.limits())
 		if err != nil {
 			return "", nil, false, err
@@ -141,37 +146,50 @@ func (b *Bundles) serve(ctx context.Context, host string, rcpt age.Recipient, if
 		if l.Statement != *c.stmt {
 			return "", nil, false, fmt.Errorf("%w: the statement changed while it was read", bundle.ErrNoBundle)
 		}
-		if c.archive, err = bundle.Archive(l.Files, time.Unix(l.Statement.Time, 0)); err != nil {
+		if archive, err = bundle.Archive(l.Files, time.Unix(l.Statement.Time, 0), format); err != nil {
 			return "", nil, false, err
+		}
+		if c.archives == nil {
+			c.archives = map[int][]byte{}
+		}
+		c.archives[format] = archive
+		if len(l.Files.Sigstore) == 0 { // no fourth file: the two formats are the same bytes
+			c.archives[bundle.Format1], c.archives[bundle.Format2] = archive, archive
 		}
 		b.builds++
 	}
 	var buf bytes.Buffer
-	buf.Grow(len(c.archive) + 1<<10)
+	buf.Grow(len(archive) + 1<<10)
 	w, err := age.Encrypt(&buf, rcpt)
 	if err != nil {
 		return "", nil, false, err
 	}
-	if _, err := w.Write(c.archive); err != nil {
+	if _, err := w.Write(archive); err != nil {
 		return "", nil, false, err
 	}
 	if err := w.Close(); err != nil {
 		return "", nil, false, err
 	}
 	ct := buf.Bytes()
-	total := len(c.archive) + len(ct)
-	for h, o := range c.enc {
+	total := len(ct)
+	for _, a := range c.archives {
+		total += len(a)
+	}
+	for k, o := range c.enc {
 		if total+len(o) > maxCacheBytes {
-			delete(c.enc, h)
+			delete(c.enc, k)
 			continue
 		}
 		total += len(o)
 	}
 	if total <= maxCacheBytes {
-		c.enc[host] = ct
+		c.enc[key] = ct
 	}
 	return commit, ct, false, nil
 }
+
+// encKey is the key of a host's ciphertext: it differs by format.
+func encKey(host string, format int) string { return host + "\x00" + strconv.Itoa(format) }
 
 func etagOf(commit string) string { return `"` + commit + `"` }
 
@@ -186,9 +204,32 @@ func etagMatches(header, etag string) bool {
 	return false
 }
 
+// FormatHeader is the request header with which a client asks for an archive format (docs/bundle.md). Without it the
+// answer is format 1. A number above 2 is answered as format 2, the highest this hub knows.
+const FormatHeader = "X-Infra-Bundle-Format"
+
+// requestedFormat reads FormatHeader.
+func requestedFormat(r *http.Request) (int, bool) {
+	v := r.Header.Get(FormatHeader)
+	if v == "" {
+		return bundle.Format1, true
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || len(v) > 3 {
+		return 0, false
+	}
+	return min(n, bundle.Format2), true
+}
+
 func (s *Server) bundle(w http.ResponseWriter, r *http.Request, host string) {
+	w.Header().Add("Vary", FormatHeader)
 	if !s.bundleIP.allow(remoteKey(r.RemoteAddr), s.Now()) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests from this address")
+		return
+	}
+	format, ok := requestedFormat(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad_format", FormatHeader+" must be a positive number")
 		return
 	}
 	rcpt, known := s.Recipients[host]
@@ -207,7 +248,7 @@ func (s *Server) bundle(w http.ResponseWriter, r *http.Request, host string) {
 			return
 		}
 	}
-	commit, body, notModified, err := s.Bundles.serve(r.Context(), host, rcpt, r.Header.Get("If-None-Match"))
+	commit, body, notModified, err := s.Bundles.serve(r.Context(), host, rcpt, r.Header.Get("If-None-Match"), format)
 	if err != nil {
 		if errors.Is(err, bundle.ErrNoBundle) {
 			slog.Warn("no bundle to serve", "host", host, "err", err)
