@@ -10,6 +10,7 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
 | 3a | Hub side of `GET /v1/bundle/<host>` (format in [bundle.md](bundle.md)) | done |
 | 3b | Certificates and IP lists over HTTPS: `GET /v1/cert/<host>/<name>`, `GET /v1/iplist/<name>`, `infra-agent cert`; the SSH server is optional | done (the hub side and `infra-agent cert`; an agent-side IP list fetcher and the CSR model below are open) |
 | 3c | Kick: the agent long-polls `GET /v1/wait/<host>`, so a merge is applied within about a mirror interval (outward connections only) | done (v0.12.0) |
+| 3e | GitHub App for the mirror and the agent fallback: a read-only installation token instead of a deploy key | done (v0.13.0) |
 | 3d | Install script: `GET /install` | done (v0.12.0) |
 | 3 | Self-update, the CSR model for certificates, the IP list fetcher in the agent | open |
 | 4a | SSH removed from the hub: `internal/sshserver`, the git upload-pack serving, `listen`, `hostKey`, `clients.*.sshKey` and `ipLists.*.hosts` are gone from the code and still accepted (ignored, one warning) in the config | done (v0.10.0) |
@@ -51,6 +52,12 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
   `ETag` is a hash of the list's `version` (itself a hash of the entries) and its sorted warnings, so `If-None-Match`
   gives a `304` although `generated` changes at every request, and a new warning (a held update, say) gives a `200`. Signing the lists with a hub signing key whose public half is part of the signed bundle
   remains an option.
+- **GitHub App, not a deploy key (v0.13.0).** Both the hub mirror (`githubApp` in the config) and the agent's GitHub
+  fallback (`INFRA_AGENT_GITHUB_APP_ID`) can authenticate to GitHub as one read-only App installed only on the
+  infrastructure repository. Tokens last an hour, are narrowed to that repository and `contents: read`, live in memory and
+  in the environment of one git process, and the key can be rotated in one place. The ssh deploy key keeps working when
+  the App is not configured, so every older config loads unchanged. The package is `internal/githubapp`; its fake
+  GitHub (REST API plus smart-HTTP git that accepts only valid tokens) is `internal/githubapp/githubapptest`.
 - **No SSH server.** Phase 4a removed it (v0.10.0). The config keys it used (`listen`, `hostKey`, `clients.*.sshKey`,
   `ipLists.*.hosts`) are accepted and ignored with one warning, because hubs follow the latest release and a release
   must read the previous one's config. A config without `https.listen` is refused. The git mirror stays: it is where

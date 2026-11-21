@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/KazuhaHub/infra-hub/internal/githubapp"
 )
 
 // mirrorRefspecs are the only refs the mirror carries.
@@ -26,6 +28,9 @@ var mirrorRefspecs = []string{
 type Mirror struct {
 	Repo     string
 	Upstream string
+	// GitHub (optional) makes the mirror fetch Upstream's repository over https with a GitHub App token instead of
+	// the SSH deploy key.
+	GitHub   *githubapp.Source
 	Interval time.Duration
 	// OnSuccess (optional) is called after every successful fetch, e.g. to persist the time for `infra-hub status`.
 	OnSuccess func(time.Time)
@@ -109,7 +114,11 @@ func (m *Mirror) fetch(ctx context.Context) error {
 			return fmt.Errorf("git init: %v: %s", err, out)
 		}
 	}
-	args := append([]string{"fetch", "--quiet", "--prune", "--force", "--no-tags", m.Upstream}, mirrorRefspecs...)
+	upstream := m.Upstream
+	if m.GitHub != nil {
+		upstream = m.GitHub.RemoteURL()
+	}
+	args := append([]string{"fetch", "--quiet", "--prune", "--force", "--no-tags", upstream}, mirrorRefspecs...)
 	if out, err := m.git(ctx, m.Repo, args...); err != nil {
 		return fmt.Errorf("git fetch: %v: %s", err, lastLines(out, 2))
 	}
@@ -117,19 +126,31 @@ func (m *Mirror) fetch(ctx context.Context) error {
 }
 
 func (m *Mirror) git(ctx context.Context, gitDir string, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
 	env := GitEnv()
 	if gitDir != "" {
 		env = append(env, "GIT_DIR="+gitDir)
 	}
-	if s := sshCommand(); s != "" {
+	if m.GitHub != nil && gitDir != "" {
+		// The fetch authenticates with a short-lived token that lives only in this process's environment.
+		tokEnv, err := m.GitHub.GitEnv(ctx)
+		if err != nil {
+			return "", err
+		}
+		env = append(env, tokEnv...)
+		args = append(m.GitHub.GitArgs(), args...)
+	} else if s := sshCommand(); s != "" && m.GitHub == nil {
 		env = append(env, "GIT_SSH_COMMAND="+s)
 	}
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = env
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf
 	err := cmd.Run()
-	return buf.String(), err
+	out := buf.String()
+	if m.GitHub != nil {
+		out = m.GitHub.Redact(out)
+	}
+	return out, err
 }
 
 // Run fetches now and then every Interval until ctx ends. A failed fetch is logged and tried again next time.

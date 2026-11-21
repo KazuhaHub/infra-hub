@@ -10,11 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"filippo.io/age"
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
+	"github.com/KazuhaHub/infra-hub/internal/githubapp"
 	"github.com/KazuhaHub/infra-hub/internal/hubtrust"
 	"github.com/KazuhaHub/infra-hub/internal/iplists"
 )
@@ -28,6 +30,9 @@ type Config struct {
 	Repo string `json:"repo"`
 	// Upstream is where the mirror fetches from (a git remote such as GitHub, over the host's deploy key).
 	Upstream string `json:"upstream"`
+	// GitHubApp (optional) makes the mirror fetch https://github.com/<owner>/<repo>.git, derived from upstream, with
+	// a read-only GitHub App token instead of the SSH deploy key. Absent: the deploy key, as before.
+	GitHubApp *GitHubApp `json:"githubApp"`
 	// State is the JSON file with the mirror time and the agents' latest reports (default: state.json next to the repo).
 	State string `json:"state"`
 	// MirrorIntervalSeconds is how often the mirror fetches (default 60).
@@ -64,6 +69,15 @@ type Config struct {
 	IPLists   map[string]iplists.IPList   `json:"ipLists"`
 	// IPListDir holds one file per provider (default: iplists next to the repo, i.e. in StateDirectory).
 	IPListDir string `json:"ipListDir"`
+}
+
+// GitHubApp is the GitHub App the hub authenticates as.
+type GitHubApp struct {
+	// AppID is the numeric App ID.
+	AppID int64 `json:"appId"`
+	// KeyFile is the App's private key (PEM), typically /run/credentials/infra-hub.service/github_app_key. It is read
+	// by the running hub when it needs a token, never by check-config.
+	KeyFile string `json:"keyFile"`
 }
 
 // HTTPS is the HTTPS listener.
@@ -288,6 +302,17 @@ func ParseConfig(data []byte) (Config, error) {
 	}
 	if c.Upstream == "" || strings.HasPrefix(c.Upstream, "-") {
 		return Config{}, errors.New("config: upstream is empty or looks like an option")
+	}
+	if c.GitHubApp != nil {
+		if c.GitHubApp.AppID <= 0 {
+			return Config{}, errors.New("config: githubApp.appId must be a positive number")
+		}
+		if !filepath.IsAbs(c.GitHubApp.KeyFile) {
+			return Config{}, errors.New("config: githubApp.keyFile must be an absolute path")
+		}
+		if _, err := githubapp.NewSource(strconv.FormatInt(c.GitHubApp.AppID, 10), c.GitHubApp.KeyFile, c.Upstream); err != nil {
+			return Config{}, fmt.Errorf("config: githubApp: upstream: %w", err)
+		}
 	}
 	if c.State == "" {
 		c.State = filepath.Join(filepath.Dir(c.Repo), "state.json")

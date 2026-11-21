@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/KazuhaHub/infra-hub/internal/certs"
 	"github.com/KazuhaHub/infra-hub/internal/config"
+	"github.com/KazuhaHub/infra-hub/internal/githubapp"
 	"github.com/KazuhaHub/infra-hub/internal/gitmirror"
 	"github.com/KazuhaHub/infra-hub/internal/httpsapi"
 	"github.com/KazuhaHub/infra-hub/internal/hubkey"
@@ -73,7 +75,15 @@ func serve(ctx context.Context, cfg config.Config) error {
 	}
 
 	bundles := &httpsapi.Bundles{Repo: cfg.Repo}
-	mirror := &gitmirror.Mirror{Repo: cfg.Repo, Upstream: cfg.Upstream, Interval: time.Duration(cfg.MirrorIntervalSeconds) * time.Second,
+	var ghApp *githubapp.Source
+	if cfg.GitHubApp != nil {
+		ghApp, err = githubapp.NewSource(strconv.FormatInt(cfg.GitHubApp.AppID, 10), cfg.GitHubApp.KeyFile, cfg.Upstream)
+		if err != nil {
+			return fmt.Errorf("githubApp: %w", err)
+		}
+		slog.Info("mirror fetches with a GitHub App", "app", cfg.GitHubApp.AppID, "repo", ghApp.Repository())
+	}
+	mirror := &gitmirror.Mirror{Repo: cfg.Repo, Upstream: cfg.Upstream, GitHub: ghApp, Interval: time.Duration(cfg.MirrorIntervalSeconds) * time.Second,
 		OnSuccess: func(t time.Time) {
 			st.SetMirrorSuccess(t)
 			bundles.Poke() // wakes the agents that wait for a new bundle

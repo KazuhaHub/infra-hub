@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KazuhaHub/infra-hub/internal/githubapp"
 	"github.com/KazuhaHub/infra-hub/internal/jointoken"
 )
 
@@ -28,7 +29,9 @@ const (
 	// they only matter when INFRA_AGENT_GITHUB_REPO is set.
 	DefaultGitHubKey        = "/etc/infra/deploy_key"
 	DefaultGitHubKnownHosts = "/etc/infra/github_known_hosts"
-	DefaultInterval         = 5 * time.Minute
+	// DefaultGitHubAppKey is the GitHub App private key, used when INFRA_AGENT_GITHUB_APP_ID is set.
+	DefaultGitHubAppKey = "/etc/infra/github-app.pem"
+	DefaultInterval     = 5 * time.Minute
 	// MinInterval keeps a typo from turning the agent into a load generator.
 	MinInterval = 10 * time.Second
 	// DefaultRepo is the repository the statement must name. Only a hidden flag changes it (tests).
@@ -42,7 +45,7 @@ const (
 )
 
 // Settings are the keys that agent.env (and the environment) may carry. Anything else with the prefix is an error.
-var settingKeys = []string{"TOKEN", "HOST", "AGE_KEY", "SIGNERS", "MODE", "INTERVAL", "STATE_DIR", "LOG_FORMAT", "LOG_LEVEL", "GITHUB_REPO", "GITHUB_KEY", "GITHUB_KNOWN_HOSTS"}
+var settingKeys = []string{"TOKEN", "HOST", "AGE_KEY", "SIGNERS", "MODE", "INTERVAL", "STATE_DIR", "LOG_FORMAT", "LOG_LEVEL", "GITHUB_REPO", "GITHUB_KEY", "GITHUB_KNOWN_HOSTS", "GITHUB_APP_ID", "GITHUB_APP_KEY"}
 
 // ConfigError is a problem with the configuration: the caller exits with the usage code (2).
 type ConfigError struct{ Err error }
@@ -68,6 +71,9 @@ type Config struct {
 	// GitHubRepo is the git URL of the repository to fall back to when no hub gives a bundle ("" turns the fallback
 	// off); GitHubKey and GitHubKnownHosts are the SSH key and known_hosts file used to reach it.
 	GitHubRepo, GitHubKey, GitHubKnownHosts string
+	// GitHubAppID (digits, "" = off) and GitHubAppKey: when set, the fallback fetches over https with a read-only
+	// GitHub App token instead of ssh, and GitHubKey and GitHubKnownHosts are not used.
+	GitHubAppID, GitHubAppKey string
 
 	// LogFormat and LogLevel are read from the file for the command line's logger; the engine ignores them.
 	LogFormat, LogLevel string
@@ -152,7 +158,7 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 		return vals[name]
 	}
 	c := Config{AgeKey: DefaultAgeKey, Signers: DefaultSigners, Mode: ModeVerify, Interval: DefaultInterval, StateDir: DefaultStateDir, Repo: DefaultRepo,
-		GitHubKey: DefaultGitHubKey, GitHubKnownHosts: DefaultGitHubKnownHosts}
+		GitHubKey: DefaultGitHubKey, GitHubKnownHosts: DefaultGitHubKnownHosts, GitHubAppKey: DefaultGitHubAppKey}
 	tok := get("TOKEN")
 	if tok == "" {
 		return c, configErrorf("%sTOKEN is required (the ih1. join token from `infra-hub token`)", EnvPrefix)
@@ -194,12 +200,27 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 		c.Interval = d
 	}
 	c.GitHubRepo = get("GITHUB_REPO")
-	for _, k := range []string{"GITHUB_KEY", "GITHUB_KNOWN_HOSTS"} {
+	for _, k := range []string{"GITHUB_KEY", "GITHUB_KNOWN_HOSTS", "GITHUB_APP_ID", "GITHUB_APP_KEY"} {
 		if c.GitHubRepo == "" && get(k) != "" {
 			return c, configErrorf("%s%s is set without %sGITHUB_REPO", EnvPrefix, k, EnvPrefix)
 		}
 	}
-	if c.GitHubRepo != "" {
+	if get("GITHUB_APP_KEY") != "" && get("GITHUB_APP_ID") == "" {
+		return c, configErrorf("%sGITHUB_APP_KEY is set without %sGITHUB_APP_ID", EnvPrefix, EnvPrefix)
+	}
+	if id := get("GITHUB_APP_ID"); id != "" {
+		var err error
+		if c.GitHubAppID, err = githubapp.ParseAppID(id); err != nil {
+			return c, configErrorf("%sGITHUB_APP_ID: %v", EnvPrefix, err)
+		}
+		if v := get("GITHUB_APP_KEY"); v != "" {
+			c.GitHubAppKey = v
+		}
+		// The repository may be an ssh or an https URL; it is fetched over https either way.
+		if _, _, err := githubapp.ParseRepo(c.GitHubRepo); err != nil {
+			return c, configErrorf("%sGITHUB_REPO: %v", EnvPrefix, err)
+		}
+	} else if c.GitHubRepo != "" {
 		if !githubURLRe.MatchString(c.GitHubRepo) && !(allowFileProtocol && strings.HasPrefix(c.GitHubRepo, "/")) {
 			return c, configErrorf("%sGITHUB_REPO %q is not an ssh git URL (git@host:path or ssh://...)", EnvPrefix, c.GitHubRepo)
 		}
@@ -212,7 +233,9 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 	}
 	c.LogFormat, c.LogLevel = get("LOG_FORMAT"), get("LOG_LEVEL")
 	paths := []string{c.AgeKey, c.Signers, c.StateDir}
-	if c.GitHubRepo != "" {
+	if c.GitHubAppID != "" {
+		paths = append(paths, c.GitHubAppKey)
+	} else if c.GitHubRepo != "" {
 		paths = append(paths, c.GitHubKey, c.GitHubKnownHosts)
 		// These two go into GIT_SSH_COMMAND, which git runs through a shell.
 		for _, p := range paths[3:] {
@@ -249,6 +272,16 @@ func (c Config) CheckFiles() (*Identity, error) {
 // nothing when the fallback is off.
 func (c Config) CheckGitHubFiles() error {
 	if c.GitHubRepo == "" {
+		return nil
+	}
+	if c.GitHubAppID != "" {
+		data, err := os.ReadFile(c.GitHubAppKey)
+		if err != nil {
+			return configErrorf("GitHub App key: %v", err)
+		}
+		if _, err := githubapp.ParseKey(data); err != nil {
+			return configErrorf("GitHub App key %s: %v", c.GitHubAppKey, err)
+		}
 		return nil
 	}
 	for _, p := range []struct{ what, path string }{{"GitHub deploy key", c.GitHubKey}, {"GitHub known_hosts", c.GitHubKnownHosts}} {

@@ -392,7 +392,11 @@ func (c *cli) newCheckConfig() *cobra.Command {
 				if err := cfg.CheckGitHubFiles(); err != nil {
 					return err
 				}
-				fmt.Fprintf(w, "github fallback: on (repo %s, key %s, known_hosts %s)\n", cfg.GitHubRepo, cfg.GitHubKey, cfg.GitHubKnownHosts)
+				if cfg.GitHubAppID != "" {
+					fmt.Fprintf(w, "github fallback: on (repo %s, GitHub App %s, key %s)\n", cfg.GitHubRepo, cfg.GitHubAppID, cfg.GitHubAppKey)
+				} else {
+					fmt.Fprintf(w, "github fallback: on (repo %s, key %s, known_hosts %s)\n", cfg.GitHubRepo, cfg.GitHubKey, cfg.GitHubKnownHosts)
+				}
 			}
 			healthy := 0
 			for _, u := range cfg.Token.Hubs {

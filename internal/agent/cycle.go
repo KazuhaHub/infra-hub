@@ -13,10 +13,12 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/KazuhaHub/infra-hub/internal/bundle"
+	"github.com/KazuhaHub/infra-hub/internal/githubapp"
 )
 
 // Results of a cycle (and of its report).
@@ -51,6 +53,9 @@ type Agent struct {
 	Cfg  Config
 	ID   *Identity
 	Hubs []*Hub
+
+	ghMu     sync.Mutex
+	ghSource *githubapp.Source // the GitHub App credential, made on first use
 
 	// SSHKeygen and Ansible are the programs to run (defaults ssh-keygen and ansible-playbook, found through PATH).
 	SSHKeygen, Ansible string

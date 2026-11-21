@@ -26,6 +26,8 @@ table, or a key set twice, is an error: the agent exits with code 2 and names th
 | `INFRA_AGENT_STATE_DIR` | `/var/lib/infra-agent` | State directory (below). |
 | `INFRA_AGENT_GITHUB_REPO` | empty (off) | Git URL of the infra repository, for the GitHub fallback (below), for example `git@github.com:KazuhaHub/infra.git`. |
 | `INFRA_AGENT_GITHUB_KEY` | `/etc/infra/deploy_key` | The deploy key for that repository. Setting it without `INFRA_AGENT_GITHUB_REPO` is an error. |
+| `INFRA_AGENT_GITHUB_APP_ID` | empty (off) | Numeric ID of the read-only GitHub App; when set, the fallback fetches over https with an installation token instead of ssh. Setting it without `INFRA_AGENT_GITHUB_REPO` is an error. |
+| `INFRA_AGENT_GITHUB_APP_KEY` | `/etc/infra/github-app.pem` | The App's private key (PEM). Setting it without `INFRA_AGENT_GITHUB_APP_ID` is an error. |
 | `INFRA_AGENT_GITHUB_KNOWN_HOSTS` | `/etc/infra/github_known_hosts` | The known_hosts file that pins GitHub's host key. Setting it without `INFRA_AGENT_GITHUB_REPO` is an error. |
 | `INFRA_AGENT_LOG_FORMAT`, `INFRA_AGENT_LOG_LEVEL` | `text`, `info` | The `--log-format` and `--log-level` flags, which can be set in the file too. |
 
@@ -273,8 +275,20 @@ bundle from a hub, minus the decryption (the files are plain in git).
   `; GitHub fallback: <error>` appended.
 - The report still goes to every hub, since none served the bundle.
 
+### With a GitHub App
+
+With `INFRA_AGENT_GITHUB_APP_ID` set, the fallback does not use ssh, the deploy key or known_hosts (those two settings are
+ignored). `INFRA_AGENT_GITHUB_REPO` may then be the ssh form (`git@github.com:KazuhaHub/infra.git`) or the https form; the
+host must be `github.com`, and the fetch uses `https://github.com/<owner>/<repo>.git`. The agent signs an app JWT with the
+key, asks GitHub for an installation token narrowed to that repository and `contents: read`, keeps it in memory until 5
+minutes before it expires, and gives it to git through `GIT_CONFIG_*` in the environment (an `http.extraheader` for
+github.com, `http.followRedirects=false`; only https is allowed). It never appears in a command line, the URL, the
+repository config or the log, and git runs with a clean environment. The retry (delete `github.git` and fetch again) and
+every check after the fetch are the same. Without the App settings nothing changes: ssh with the deploy key. How to create
+the App: [README](../README.md#github-app-optional-githubapp).
+
 `check-config` prints the fallback settings (or `github fallback: off`) and checks that the key and the known_hosts file
-can be read.
+can be read (with the App: that the App key can be read and parsed).
 
 ## Fetching a certificate
 
