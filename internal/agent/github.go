@@ -34,6 +34,13 @@ var allowFileProtocol = false
 // accepted only there). They are never set outside tests.
 var githubTestAPI, githubTestGitBase string
 
+// githubAuthError is a failure to get a GitHub App token (key, API, installation), not a failure of git or of the
+// cached repository.
+type githubAuthError struct{ err error }
+
+func (e *githubAuthError) Error() string { return e.err.Error() }
+func (e *githubAuthError) Unwrap() error { return e.err }
+
 // githubBundleError is a GitHub tree that does not hold a usable bundle (a missing file, one over its limit, a bad
 // statement): a bad bundle, not a transport failure.
 type githubBundleError struct{ err error }
@@ -48,7 +55,9 @@ func (e *githubBundleError) Unwrap() error { return e.err }
 // reported (a githubBundleError means the bundle itself is bad).
 func (a *Agent) fetchGitHub(ctx context.Context) (bundle.Files, error) {
 	files, err := a.fetchGitHubOnce(ctx)
-	if err == nil || ctx.Err() != nil {
+	var ae *githubAuthError
+	if err == nil || ctx.Err() != nil || errors.As(err, &ae) {
+		// A bad key, an uninstalled App or an API failure says nothing about the cached repository: keep it.
 		return files, err
 	}
 	slog.Warn("GitHub fetch failed, starting again from an empty repository", "err", err)
@@ -87,11 +96,11 @@ func (a *Agent) fetchGitHubOnce(ctx context.Context) (bundle.Files, error) {
 		// A read-only GitHub App token over https; the token is in git's environment only.
 		var err error
 		if src, err = a.githubSource(); err != nil {
-			return bundle.Files{}, err
+			return bundle.Files{}, &githubAuthError{err}
 		}
 		tokEnv, err := src.GitEnv(ctx)
 		if err != nil {
-			return bundle.Files{}, err
+			return bundle.Files{}, &githubAuthError{err}
 		}
 		env = append(env, tokEnv...)
 		repo = src.RemoteURL()

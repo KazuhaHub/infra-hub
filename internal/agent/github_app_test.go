@@ -136,3 +136,31 @@ func TestCheckGitHubFilesApp(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A token failure is not repository damage: the cached github.git stays.
+func TestGitHubAppAuthFailureKeepsTheCache(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	w.Publish(agenttest.Options{})
+	api := githubapptest.NewAPI(t, "4242", nil)
+	git := githubapptest.NewGit(t, api)
+	git.Seed(t, "acme/infra", w.MirrorRepo)
+	githubTestAPI, githubTestGitBase = api.URL, git.Server.URL
+	t.Cleanup(func() { githubTestAPI, githubTestGitBase = "", "" })
+	keyFile := filepath.Join(t.TempDir(), "k.pem")
+	os.WriteFile(keyFile, api.KeyPEM(), 0o600)
+	a := githubAgent(t, w, ModeApply, "git@github.com:acme/infra.git", agenttest.DeadURL(t))
+	a.Cfg.GitHubAppID, a.Cfg.GitHubAppKey = "4242", keyFile
+	if o := cycle(t, a); o.Result != ResultOK {
+		t.Fatalf("first cycle %+v", o)
+	}
+	marker := filepath.Join(githubDir(w.StateDir), "marker")
+	os.WriteFile(marker, []byte("x"), 0o600)
+	other := githubapptest.NewAPI(t, "4242", nil)
+	os.WriteFile(keyFile, other.KeyPEM(), 0o600) // not the App's key
+	if o := cycle(t, a); o.Result != ResultUnreachable {
+		t.Fatalf("bad key %+v", o)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Error("an auth failure wiped the cached repository")
+	}
+}

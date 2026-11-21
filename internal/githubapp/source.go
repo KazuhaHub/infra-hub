@@ -67,7 +67,7 @@ type Source struct {
 	mu      sync.Mutex
 	app     *App
 	keyStat string
-	secrets map[string]bool // every token handed out, for Redact
+	recent  []string // the current and the previous token, for Redact
 }
 
 // NewSource checks its arguments and makes no request and opens no file.
@@ -168,11 +168,12 @@ func (s *Source) GitEnv(ctx context.Context) ([]string, error) {
 		return nil, s.redactErr(err)
 	}
 	s.mu.Lock()
-	if s.secrets == nil {
-		s.secrets = map[string]bool{}
+	if len(s.recent) == 0 || s.recent[len(s.recent)-1] != tok {
+		s.recent = append(s.recent, tok)
+		if len(s.recent) > 2 {
+			s.recent = s.recent[len(s.recent)-2:]
+		}
 	}
-	s.secrets[tok] = true
-	s.secrets[basic(tok)] = true
 	s.mu.Unlock()
 	return []string{
 		"GIT_CONFIG_COUNT=2",
@@ -191,8 +192,8 @@ func basic(tok string) string {
 func (s *Source) Redact(out string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for sec := range s.secrets {
-		out = strings.ReplaceAll(out, sec, "***")
+	for _, tok := range s.recent {
+		out = strings.ReplaceAll(strings.ReplaceAll(out, tok, "***"), basic(tok), "***")
 	}
 	return out
 }

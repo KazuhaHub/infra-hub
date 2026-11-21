@@ -224,13 +224,21 @@ func (a *App) Token(ctx context.Context, owner, repo string) (string, error) {
 	delete(a.tokens, full)
 	a.mu.Unlock()
 
-	f.token, f.err = a.mint(ctx, owner, repo)
-
-	a.mu.Lock()
-	delete(a.flights, full)
-	a.mu.Unlock()
-	close(f.done)
-	return f.token, f.err
+	// The request runs on its own context (bounded by the HTTP client's timeout), so one caller giving up does
+	// not fail the others that share it.
+	go func() {
+		f.token, f.err = a.mint(context.WithoutCancel(ctx), owner, repo)
+		a.mu.Lock()
+		delete(a.flights, full)
+		a.mu.Unlock()
+		close(f.done)
+	}()
+	select {
+	case <-f.done:
+		return f.token, f.err
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 func (a *App) mint(ctx context.Context, owner, repo string) (string, error) {
