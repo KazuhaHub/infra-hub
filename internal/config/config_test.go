@@ -275,3 +275,33 @@ func TestDeprecatedSnakeCaseKeys(t *testing.T) {
 		t.Error("unknown key accepted")
 	}
 }
+
+func TestConfigGitHubApp(t *testing.T) {
+	base := func(upstream, extra string) string {
+		return `{"repo":"/var/lib/infra-hub/infra.git","upstream":"` + upstream + `",` + httpsBlock + `,"clients":{"a":{}}` + extra + `}`
+	}
+	// Today's config (no githubApp) loads unchanged.
+	if c, err := ParseConfig([]byte(base("git@github.com:KazuhaHub/infra.git", ""))); err != nil || c.GitHubApp != nil {
+		t.Fatalf("old config: %+v %v", c, err)
+	}
+	app := `,"githubApp":{"appId":4242,"keyFile":"/run/credentials/infra-hub.service/github_app_key"}`
+	for _, up := range []string{"git@github.com:KazuhaHub/infra.git", "https://github.com/KazuhaHub/infra.git"} {
+		c, err := ParseConfig([]byte(base(up, app)))
+		if err != nil || c.GitHubApp == nil || c.GitHubApp.AppID != 4242 {
+			t.Fatalf("%s: %+v %v", up, c, err)
+		}
+	}
+	bad := map[string]string{
+		"other host":   base("git@git.example.org:a/b.git", app),
+		"zero id":      base("git@github.com:a/b.git", `,"githubApp":{"appId":0,"keyFile":"/k"}`),
+		"relative key": base("git@github.com:a/b.git", `,"githubApp":{"appId":1,"keyFile":"k"}`),
+		"no key":       base("git@github.com:a/b.git", `,"githubApp":{"appId":1}`),
+		"unknown":      base("git@github.com:a/b.git", `,"githubApp":{"appId":1,"keyFile":"/k","api":"http://x"}`),
+		"string id":    base("git@github.com:a/b.git", `,"githubApp":{"appId":"x","keyFile":"/k"}`),
+	}
+	for name, cfg := range bad {
+		if _, err := ParseConfig([]byte(cfg)); err == nil {
+			t.Errorf("%s accepted", name)
+		}
+	}
+}

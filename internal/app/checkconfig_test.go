@@ -92,3 +92,24 @@ func TestCheckConfigState(t *testing.T) {
 		t.Errorf("state is a directory: code %d", code)
 	}
 }
+
+// githubApp is validated, but its key file is never opened (it may exist only inside the service).
+func TestCheckConfigGitHubApp(t *testing.T) {
+	h := newHub(t)
+	var m map[string]any
+	data, _ := os.ReadFile(h.config)
+	json.Unmarshal(data, &m)
+	m["upstream"] = "git@github.com:KazuhaHub/infra.git"
+	m["githubApp"] = map[string]any{"appId": 4242, "keyFile": filepath.Join(h.dir, "no-such-key")}
+	data, _ = json.Marshal(m)
+	os.WriteFile(h.config, data, 0o600)
+	if code, _, errs := runCheck(t, h.config); code != 0 {
+		t.Fatalf("code %d: %s", code, errs)
+	}
+	m["githubApp"] = map[string]any{"appId": 4242, "keyFile": "relative"}
+	data, _ = json.Marshal(m)
+	os.WriteFile(h.config, data, 0o600)
+	if code, _, _ := runCheck(t, h.config); code == 0 {
+		t.Fatal("a relative keyFile passed")
+	}
+}

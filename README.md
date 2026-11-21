@@ -115,6 +115,46 @@ server removed in v0.10.0 (`listen`, `hostKey` / `host_key`, `clients.*.sshKey` 
 `ipLists.*.hosts`) are still accepted: they are ignored and the hub logs one warning that names them. Delete them when
 convenient. A config without `https.listen` is refused: there is no other listener.
 
+### GitHub App (optional): `githubApp`
+
+```json
+"upstream": "git@github.com:KazuhaHub/infra.git",
+"githubApp": {"appId": 123456, "keyFile": "/run/credentials/infra-hub.service/github_app_key"}
+```
+
+Without `githubApp` the mirror fetches `upstream` over ssh with the deploy key from `CREDENTIALS_DIRECTORY`, as before.
+With it, the mirror fetches `https://github.com/<owner>/<repo>.git`, derived from `upstream` (the ssh forms
+`git@github.com:o/r.git` and `ssh://git@github.com/o/r.git` and the https form are all accepted; the host must be
+`github.com`), with a short-lived read-only installation token of a GitHub App:
+
+- The hub signs an RS256 JWT (issued 60 s in the past, valid 9 minutes, `iss` = `appId`), looks up the installation of
+  the repository (`GET /repos/{owner}/{repo}/installation`) and asks for a token narrowed to that one repository and
+  `{"contents": "read"}` (`POST /app/installations/{id}/access_tokens`). The token is kept in memory and replaced 5
+  minutes before it expires; concurrent requests share one request to GitHub.
+- git receives the token as `http.https://github.com/.extraheader` (Basic `x-access-token`) through
+  `GIT_CONFIG_COUNT/KEY/VALUE` in its environment, with `http.followRedirects=false`, `protocol.allow=never` and only
+  https allowed. The token is never in a command line, the remote URL, `.git/config` or a log line (git output is scrubbed
+  of it before it is logged), and git runs with a clean environment (no inherited `GIT_TRACE*`, `GIT_CURL_VERBOSE`,
+  `GIT_ASKPASS` and so on). The repository the token is for comes from `upstream` only.
+- The key file is read when a token is needed (and again after it changes), not at start and not by `check-config`,
+  which validates `appId` (positive), `keyFile` (absolute) and that `upstream` is a github.com repository, and never
+  opens the key. A config without `githubApp` loads unchanged.
+- The key is a PEM RSA key (PKCS#1 or PKCS#8) of the App.
+
+#### Creating the read-only App (owner steps)
+
+1. GitHub, organisation KazuhaHub, Settings, Developer settings, GitHub Apps, New GitHub App. Name `infra-hub`, any
+   homepage URL, Webhook off. Repository permissions: Contents: Read-only, nothing else (Metadata: Read is added
+   automatically). Where can this App be installed: Only on this account.
+2. Create the App, note its App ID, and Generate a private key (a `.pem` file downloads).
+3. Install App, choose KazuhaHub, Only select repositories, `infra` only.
+4. Store the `.pem` with SOPS in the infra repository; deploy it to both hubs as the systemd credential `github_app_key`
+   (replace the `deploy_key` and `known_hosts` credentials), and to the hub hosts' agents as `/etc/infra/github-app.pem`
+   (mode 0600).
+5. Add `githubApp` to each hub's config, and `INFRA_AGENT_GITHUB_APP_ID=<App ID>` (key path default
+   `/etc/infra/github-app.pem`) to the hub hosts' `agent.env`. Restart or let the service reload; check the mirror
+   fetches (`infra-hub status`), then remove the old read-only deploy key from the repository's settings.
+
 ### Config keys are camelCase (migration)
 
 Every config key is lower camelCase, like the rest of the JSON this project writes (`mirrorIntervalSeconds`, `maxStaleSeconds`, `waitTimeoutSeconds`, `certDir`, `acmeDirectory`, `acmeEmail`, `cloudflareTokenFile`,

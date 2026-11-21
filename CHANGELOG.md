@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.13.0
+
+### Added
+
+- GitHub App authentication, as an alternative to the ssh deploy key. The hub config takes an optional `githubApp`
+  (`appId`, `keyFile`, typically `/run/credentials/infra-hub.service/github_app_key`): the mirror then fetches
+  `https://github.com/<owner>/<repo>.git`, derived from `upstream` (ssh or https form, host `github.com`), with a
+  read-only installation token narrowed to that one repository and `contents: read`. `check-config` validates the
+  fields and does not open the key file.
+- The agent's GitHub fallback takes `INFRA_AGENT_GITHUB_APP_ID` and `INFRA_AGENT_GITHUB_APP_KEY` (default
+  `/etc/infra/github-app.pem`) and then fetches over https with the App token instead of ssh; `INFRA_AGENT_GITHUB_REPO`
+  may be the ssh or the https form.
+- Tokens are kept in memory and replaced 5 minutes before they expire; the token is never in a command line, the remote
+  URL, `.git/config` or a log line; https only, no redirects, a clean git environment.
+- Without these settings nothing changes: older configs load as before and the deploy key keeps working. Setup:
+  README, "GitHub App".
+
 ## v0.12.0
 
 ### Added
