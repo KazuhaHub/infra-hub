@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/KazuhaHub/infra-hub/internal/githubapp"
 	"github.com/KazuhaHub/infra-hub/internal/jointoken"
+	"github.com/KazuhaHub/infra-hub/internal/sigstorever"
 )
 
 // EnvPrefix is the prefix of every setting and of every flag's environment variable.
@@ -55,7 +57,7 @@ const (
 )
 
 // Settings are the keys that agent.env (and the environment) may carry. Anything else with the prefix is an error.
-var settingKeys = []string{"TOKEN", "HOST", "AGE_KEY", "SIGNERS", "MODE", "SIGNATURE", "INTERVAL", "STATE_DIR", "LOG_FORMAT", "LOG_LEVEL", "GITHUB_REPO", "GITHUB_KEY", "GITHUB_KNOWN_HOSTS", "GITHUB_APP_ID", "GITHUB_APP_KEY"}
+var settingKeys = []string{"TOKEN", "HOST", "AGE_KEY", "SIGNERS", "MODE", "SIGNATURE", "SIGSTORE_REPO_ID", "SIGSTORE_OWNER_ID", "INTERVAL", "STATE_DIR", "LOG_FORMAT", "LOG_LEVEL", "GITHUB_REPO", "GITHUB_KEY", "GITHUB_KNOWN_HOSTS", "GITHUB_APP_ID", "GITHUB_APP_KEY"}
 
 // ConfigError is a problem with the configuration: the caller exits with the usage code (2).
 type ConfigError struct{ Err error }
@@ -76,8 +78,11 @@ type Config struct {
 	Mode    string
 	// Signature is the signature mode: SigSSH, SigEither or SigSigstore.
 	Signature string
-	Interval  time.Duration
-	StateDir  string
+	// SigstoreRepoID and SigstoreOwnerID are GitHub's numeric IDs of the infra repository and of its owner, which the
+	// signing certificate must carry (required in signature modes either and sigstore).
+	SigstoreRepoID, SigstoreOwnerID string
+	Interval                        time.Duration
+	StateDir                        string
 	// Repo is the repository the bundle statement must name.
 	Repo string
 	// GitHubRepo is the git URL of the repository to fall back to when no hub gives a bundle ("" turns the fallback
@@ -95,6 +100,8 @@ var (
 	githubURLRe = regexp.MustCompile(`^(ssh://[A-Za-z0-9@._:\[\]%/~+-]+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._/~+-]+)$`)
 	safePathRe  = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 )
+
+var idRe = regexp.MustCompile(`^[1-9][0-9]{0,18}$`)
 
 var hostRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
@@ -207,6 +214,22 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 		}
 		c.Signature = v
 	}
+	for _, k := range []struct {
+		key string
+		dst *string
+	}{{"SIGSTORE_REPO_ID", &c.SigstoreRepoID}, {"SIGSTORE_OWNER_ID", &c.SigstoreOwnerID}} {
+		v := get(k.key)
+		if v == "" {
+			if c.WantsSigstore() {
+				return c, configErrorf("%s%s is required in signature mode %s (GitHub's numeric ID; `gh api repos/<owner>/<repo> -q .id`, `gh api users/<owner> -q .id`)", EnvPrefix, k.key, c.Signature)
+			}
+			continue
+		}
+		if !idRe.MatchString(v) {
+			return c, configErrorf("%s%s %q is not a number", EnvPrefix, k.key, v)
+		}
+		*k.dst = v
+	}
 	if v := get("INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
 		if err != nil {
@@ -269,6 +292,15 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 	}
 	return c, nil
 }
+
+// SigstoreManager is the TUF-backed trusted root of this configuration: the cache and a small info file in the state
+// directory.
+func (c Config) SigstoreManager() *sigstorever.Manager {
+	return sigstorever.NewManager(filepath.Join(c.StateDir, "sigstore-tuf"), c.SigstoreInfoPath())
+}
+
+// SigstoreInfoPath is the file in which the manager records which root it chose and when.
+func (c Config) SigstoreInfoPath() string { return filepath.Join(c.StateDir, "sigstore-root.json") }
 
 // WantsSigstore reports whether the agent verifies Sigstore signatures (and so asks for archive format 2).
 func (c Config) WantsSigstore() bool { return c.Signature == SigEither || c.Signature == SigSigstore }

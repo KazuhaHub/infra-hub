@@ -28,6 +28,8 @@ reads only them). Three new files:
   `https://github.com/<owner/name>/.github/workflows/attest-main.yml@refs/heads/main` with OIDC issuer
   `https://token.actions.githubusercontent.com`; the same name is in the certificate whatever event started the run
   (push, schedule, workflow_dispatch), because the name is the workflow reference, and the event is a separate extension.
+  The agent also pins the certificate's GitHub extensions (source repository and owner URIs and numeric IDs, ref, build
+  signer, runner, source digest = the statement's commit); see agent.md.
   Later the ssh signature is dropped and this becomes the only signature; the file is optional until then.
 
 Limits: bundle.tar.gz at most 64 MiB; statement at most 4 KiB; signature at most 4 KiB; bundle.sigstore.json at most

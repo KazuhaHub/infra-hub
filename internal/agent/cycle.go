@@ -21,6 +21,7 @@ import (
 
 	"github.com/KazuhaHub/infra-hub/internal/bundle"
 	"github.com/KazuhaHub/infra-hub/internal/githubapp"
+	"github.com/KazuhaHub/infra-hub/internal/sigstorever"
 )
 
 // Results of a cycle (and of its report).
@@ -62,6 +63,12 @@ type Agent struct {
 	// SigstoreRoot is the trusted material for Sigstore verification; nil means the root embedded in the binary. Only
 	// tests set it.
 	SigstoreRoot root.TrustedMaterial
+	// SigstoreTUF keeps the Sigstore trusted root current through TUF (refresh at most daily, cached in the state
+	// directory; embedded root as the last resort). Nil means the embedded root only; infra-agent sets it in the
+	// signature modes that need it.
+	SigstoreTUF *sigstorever.Manager
+	// sigWarn is a Sigstore signature that failed while the ssh signature was accepted (either mode), for the report.
+	sigWarn string
 	// SSHKeygen and Ansible are the programs to run (defaults ssh-keygen and ansible-playbook, found through PATH).
 	SSHKeygen, Ansible string
 	// InfraLock and InfraApplied are infra-pull's lock and applied record; LockTimeout bounds the wait for the lock.
@@ -171,6 +178,7 @@ func (a *Agent) Cycle(ctx context.Context) (Outcome, error) {
 		return Outcome{}, err
 	}
 	a.floor = 0
+	a.sigWarn = ""
 	var o Outcome
 	var served *Hub
 	var rejs []rejection
@@ -195,6 +203,10 @@ func (a *Agent) Cycle(ctx context.Context) (Outcome, error) {
 		// Stopped from outside: what the cycle found is not a result, and the last real one stays in the state.
 		slog.Info("interrupted", "host", a.Cfg.Host, "result", o.Result)
 		return o, fmt.Errorf("%w: %v", ErrInterrupted, ctx.Err())
+	}
+	if a.sigWarn != "" && o.Result != ResultRejected {
+		// The bundle was accepted with the ssh signature although its Sigstore signature failed: say so in the report.
+		o.Message += "; sigstore: " + truncate(a.sigWarn, 140)
 	}
 	o.Message = truncate(o.Message, MaxMessage)
 	st.LastResult, st.LastMessage, st.LastHub = o.Result, o.Message, o.Hub
@@ -375,6 +387,13 @@ func (a *Agent) decide(ctx context.Context, st *State, source, target string, ne
 		o.Result, o.Message = ResultUnchanged, fmt.Sprintf("%s is applied", short(target))
 		return o
 	}
+	// In sigstore mode only a bundle whose Sigstore signature was verified is applied, a re-apply included: a bundle that
+	// was verified with the ssh signature, before the mode was switched, waits until it has been seen with its Sigstore
+	// signature.
+	if cfg.Signature == SigSigstore && st.Verified != nil && st.Verified.Commit == target && st.Verified.Signature != SigSigstore {
+		o.Result, o.Message = ResultRejected, fmt.Sprintf("refusing to apply %s: it was verified with the %s signature, not the Sigstore signature that this host requires", short(target), orSSH(st.Verified.Signature))
+		return o
+	}
 	// infra-pull and the bootstrap hold this lock while they apply; two runs of ansible on one host must not overlap.
 	lock, err := LockFile(ctx, a.InfraLock, a.LockTimeout)
 	if err != nil {
@@ -476,6 +495,9 @@ func (a *Agent) acceptFiles(ctx context.Context, st *State, files bundle.Files) 
 			st.Verified = &Record{Commit: stmt.Commit, Time: time.Unix(stmt.Time, 0).UTC(), At: a.now(), Signature: sig}
 		} else if st.Verified.Commit == stmt.Commit && st.Verified.Signature != sig && (sig == SigSigstore || st.Verified.Signature == "") {
 			st.Verified.Signature = sig // the same bundle, now seen with a signature that counts for more
+			if err := st.Save(a.Cfg.StateDir); err != nil {
+				return stmt, 0, local(fmt.Errorf("write state: %w", err))
+			}
 		}
 		return stmt, statusSame, nil
 	}
@@ -649,4 +671,11 @@ func (a *Agent) takeRestartRequest() bool {
 // Jitter is d with a random difference of up to 10 %.
 func Jitter(d time.Duration) time.Duration {
 	return d + time.Duration((rand.Float64()*0.2-0.1)*float64(d))
+}
+
+func orSSH(sig string) string {
+	if sig == "" {
+		return SigSSH
+	}
+	return sig
 }

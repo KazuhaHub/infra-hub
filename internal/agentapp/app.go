@@ -244,6 +244,9 @@ func (c *cli) newRun() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if cfg.WantsSigstore() {
+				a.SigstoreTUF = sigstoreManager(cfg)
+			}
 			a.Ansible, _ = cmd.Flags().GetString("ansible")
 			a.SSHKeygen, _ = cmd.Flags().GetString("ssh-keygen")
 			a.InfraLock, _ = cmd.Flags().GetString("infra-lock")
@@ -300,6 +303,8 @@ type statusDoc struct {
 	APIVersion string `json:"apiVersion"`
 	Host       string `json:"host"`
 	Mode       string `json:"mode"`
+	// SigstoreRoot is where the Sigstore trusted root came from (signature modes either and sigstore, once a bundle was verified).
+	SigstoreRoot *sigstorever.Info `json:"sigstoreRoot,omitempty"`
 	agent.State
 }
 
@@ -323,6 +328,11 @@ func (c *cli) newStatus() *cobra.Command {
 				return err
 			}
 			doc := statusDoc{APIVersion: "v1", Host: cfg.Host, Mode: cfg.Mode, State: st}
+			if cfg.WantsSigstore() {
+				if info, err := sigstorever.ReadInfo(cfg.SigstoreInfoPath()); err == nil {
+					doc.SigstoreRoot = &info
+				}
+			}
 			if output == "json" {
 				enc := json.NewEncoder(c.stdout)
 				enc.SetIndent("", "  ")
@@ -334,6 +344,13 @@ func (c *cli) newStatus() *cobra.Command {
 			row("mode", cfg.Mode)
 			row("applied", recordText(st.Applied, "appliedAt"))
 			row("verified", recordText(st.Verified, "verifiedAt"))
+			if cfg.WantsSigstore() {
+				if info, err := sigstorever.ReadInfo(cfg.SigstoreInfoPath()); err == nil {
+					row("sigstore root", rootInfoText(info))
+				} else {
+					row("sigstore root", "")
+				}
+			}
 			row("last result", st.LastResult)
 			row("last message", st.LastMessage)
 			if st.LastHub == agent.GitHubSource {
@@ -395,14 +412,21 @@ func (c *cli) newCheckConfig() *cobra.Command {
 			fmt.Fprintf(w, "signature: %s\n", cfg.Signature)
 			summary, rootErr := sigstorever.RootSummary()
 			switch {
-			case rootErr == nil && cfg.WantsSigstore():
-				fmt.Fprintf(w, "sigstore:  trusted root ok (%s); identity %s\n", summary, sigstorever.Identity(cfg.Repo))
-			case rootErr == nil:
-				fmt.Fprintf(w, "sigstore:  not used; trusted root ok (%s)\n", summary)
-			case cfg.WantsSigstore():
+			case rootErr != nil && cfg.WantsSigstore():
 				return &agent.ConfigError{Err: rootErr}
+			case rootErr != nil:
+				fmt.Fprintf(w, "sigstore:  not used; embedded trusted root does not parse: %v\n", rootErr)
+			case !cfg.WantsSigstore():
+				fmt.Fprintf(w, "sigstore:  not used; embedded trusted root ok (%s)\n", summary)
 			default:
-				fmt.Fprintf(w, "sigstore:  not used; trusted root does not parse: %v\n", rootErr)
+				fmt.Fprintf(w, "sigstore:  embedded trusted root ok (%s); identity %s, repo ID %s, owner ID %s\n", summary, sigstorever.Identity(cfg.Repo), cfg.SigstoreRepoID, cfg.SigstoreOwnerID)
+				ctx, cancel := context.WithTimeout(cmd.Context(), sigstorever.FetchTimeout+5*time.Second)
+				_, info, err := sigstoreManager(cfg).Root(ctx)
+				cancel()
+				if err != nil {
+					return &agent.ConfigError{Err: err}
+				}
+				fmt.Fprintf(w, "sigstore root: %s\n", rootInfoText(info))
 			}
 			if cfg.GitHubRepo == "" {
 				fmt.Fprintln(w, "github fallback: off")
@@ -440,6 +464,17 @@ func (c *cli) newCheckConfig() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// sigstoreManager is the TUF-backed trusted root of a configuration (a variable so that tests stay off the network).
+var sigstoreManager = func(cfg agent.Config) *sigstorever.Manager { return cfg.SigstoreManager() }
+
+// rootInfoText says where the trusted root came from and how old that is.
+func rootInfoText(i sigstorever.Info) string {
+	if i.Updated.IsZero() {
+		return i.Source
+	}
+	return fmt.Sprintf("%s, TUF metadata refreshed %s (%s ago)", i.Source, i.Updated.UTC().Format(time.RFC3339), time.Since(i.Updated).Round(time.Minute))
 }
 
 func hostPort(u string) string {

@@ -281,10 +281,22 @@ func TestSigstoreNeedsNoAllowedSigners(t *testing.T) {
 	if _, err := cfg.CheckFiles(); err == nil {
 		t.Error("ssh mode accepted a missing allowed_signers")
 	}
+	for _, mode := range []string{SigEither, SigSigstore} {
+		vals["INFRA_AGENT_SIGNATURE"] = mode
+		if _, err := FromValues(vals, nil); !isConfigError(err) || !strings.Contains(err.Error(), "SIGSTORE_REPO_ID is required") {
+			t.Fatalf("%s without the IDs: %v", mode, err)
+		}
+	}
+	vals["INFRA_AGENT_SIGSTORE_REPO_ID"], vals["INFRA_AGENT_SIGSTORE_OWNER_ID"] = "1462297697", "165913136"
+	vals["INFRA_AGENT_SIGSTORE_OWNER_ID"] = "abc"
+	if _, err := FromValues(vals, nil); !isConfigError(err) || !strings.Contains(err.Error(), "SIGSTORE_OWNER_ID") {
+		t.Errorf("bad ID: %v", err)
+	}
+	vals["INFRA_AGENT_SIGSTORE_OWNER_ID"] = "165913136"
 	for _, mode := range []string{SigEither} {
 		vals["INFRA_AGENT_SIGNATURE"] = mode
-		if cfg, _ = FromValues(vals, nil); cfg.Signature != mode {
-			t.Fatalf("signature %q", cfg.Signature)
+		if cfg, _ = FromValues(vals, nil); cfg.Signature != mode || cfg.SigstoreRepoID != "1462297697" || cfg.SigstoreOwnerID != "165913136" {
+			t.Fatalf("config %+v", cfg)
 		}
 		if _, err := cfg.CheckFiles(); err == nil {
 			t.Errorf("%s mode accepted a missing allowed_signers", mode)
@@ -454,3 +466,86 @@ func TestEmbeddedRootIsUsedWhenNothingIsInjected(t *testing.T) {
 }
 
 func timeOf(l bundle.Loaded) time.Time { return time.Unix(l.Statement.Time, 0) }
+
+func TestEitherModeReportsAFailedSigstoreSignature(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{Sigstore: &sigstoretest.Options{Repo: "Evil/infra"}})
+	o := cycle(t, sigAgent(t, w, SigEither, hub))
+	if o.Result != ResultVerified || !strings.Contains(o.Message, "; sigstore: ") || !strings.Contains(o.Message, "does not verify") || len(o.Message) > MaxMessage {
+		t.Fatalf("outcome %+v", o)
+	}
+	rep, ok := hub.Report(t)
+	if !ok || !strings.Contains(rep.Message, "sigstore: ") {
+		t.Errorf("the hub's report %+v", rep)
+	}
+	// A good Sigstore signature, or none, adds nothing.
+	w2 := agenttest.NewWorld(t)
+	hub2 := w2.StartHub()
+	w2.Publish(agenttest.Options{})
+	if o := cycle(t, sigAgent(t, w2, SigEither, hub2)); strings.Contains(o.Message, "sigstore") {
+		t.Errorf("outcome %+v", o)
+	}
+}
+
+func TestSigstoreModeDoesNotApplyABundleVerifiedWithSSH(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	p := w.Publish(agenttest.Options{})
+	a, clk := newAgent(t, w, ModeApply, hub)
+	if o := cycle(t, a); o.Result != ResultOK {
+		t.Fatalf("%+v", o)
+	}
+	runs := len(w.StubRuns())
+	// The host is switched to sigstore mode; the applied bundle was verified with ssh. Not yet due: nothing to do.
+	a.Cfg.Signature = SigSigstore
+	st := mustState(t, w)
+	if o := a.decide(context.Background(), &st, hub.URL, p.Commit, false); o.Result != ResultUnchanged {
+		t.Fatalf("%+v", o)
+	}
+	// Due again after 24 h: the re-apply is refused, because the record says ssh.
+	clk.t = clk.t.Add(25 * time.Hour)
+	o := a.decide(context.Background(), &st, hub.URL, p.Commit, false)
+	if o.Result != ResultRejected || !strings.Contains(o.Message, "refusing to apply") || len(w.StubRuns()) != runs {
+		t.Fatalf("%+v, runs %v", o, w.StubRuns())
+	}
+	// Seen with its Sigstore signature, the same bundle is applied (a record from an older agent has none: ssh too).
+	st.Verified.Signature = SigSigstore
+	if o := a.decide(context.Background(), &st, hub.URL, p.Commit, false); o.Result != ResultOK || len(w.StubRuns()) != runs+1 {
+		t.Fatalf("%+v", o)
+	}
+	// In ssh mode nothing of this applies.
+	st.Verified.Signature = ""
+	a.Cfg.Signature = SigSSH
+	clk.t = clk.t.Add(25 * time.Hour)
+	if o := a.decide(context.Background(), &st, hub.URL, p.Commit, false); o.Result != ResultOK {
+		t.Fatalf("%+v", o)
+	}
+}
+
+// The bundle that the real CI of KazuhaHub/infra made verifies through the agent with the embedded root and the strict
+// policy (no test root, so nothing is relaxed); another repository or owner ID does not.
+func TestRealCIBundleThroughTheAgent(t *testing.T) {
+	read := func(n string) []byte {
+		b, err := os.ReadFile(filepath.Join("..", "sigstorever", "testdata", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	files := bundle.Files{Statement: read("bundle"), Sigstore: read("bundle.sigstore.json")}
+	w := agenttest.NewWorld(t)
+	a, _ := newAgentURLs(t, w, ModeVerify, []string{agenttest.DeadURL(t)}, []string{testPin})
+	a.Cfg.Signature, a.Cfg.SigstoreRepoID, a.Cfg.SigstoreOwnerID = SigSigstore, "1462297697", "165913136"
+	if sig, err := a.verifyFiles(context.Background(), files); err != nil || sig != SigSigstore {
+		t.Fatalf("%q %v", sig, err)
+	}
+	for name, ids := range map[string][2]string{"repository ID": {"1", "165913136"}, "owner ID": {"1462297697", "1"}} {
+		a.Cfg.SigstoreRepoID, a.Cfg.SigstoreOwnerID = ids[0], ids[1]
+		_, err := a.verifyFiles(context.Background(), files)
+		var rj *RejectError
+		if !errors.As(err, &rj) || !strings.Contains(rj.Reason, "Identifier") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

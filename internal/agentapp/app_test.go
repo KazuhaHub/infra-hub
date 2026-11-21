@@ -13,6 +13,7 @@ import (
 	"github.com/KazuhaHub/infra-hub/internal/agent"
 	"github.com/KazuhaHub/infra-hub/internal/agenttest"
 	"github.com/KazuhaHub/infra-hub/internal/hubkey"
+	"github.com/KazuhaHub/infra-hub/internal/sigstorever"
 )
 
 // runAgent runs the command line with an empty environment apart from env.
@@ -180,24 +181,51 @@ func TestCheckConfig(t *testing.T) {
 }
 
 func TestCheckConfigSignatureMode(t *testing.T) {
+	old := sigstoreManager
+	sigstoreManager = func(cfg agent.Config) *sigstorever.Manager {
+		m := cfg.SigstoreManager()
+		m.Offline = true
+		return m
+	}
+	defer func() { sigstoreManager = old }()
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
 	envFile := writeEnvFile(t, w, "verify", []string{hub.URL}, []string{hub.Pin})
 	_, out, _ := runAgent(t, nil, "check-config", "--env-file", envFile)
-	if !strings.Contains(out, "signature: ssh\n") || !strings.Contains(out, "sigstore:  not used; trusted root ok (") {
+	if !strings.Contains(out, "signature: ssh\n") || !strings.Contains(out, "sigstore:  not used; embedded trusted root ok (") {
 		t.Errorf("default:\n%s", out)
 	}
 	data, _ := os.ReadFile(envFile)
 	// sigstore mode needs no allowed_signers file.
-	content := strings.Replace(string(data), "INFRA_AGENT_SIGNERS="+w.SignersPath, "INFRA_AGENT_SIGNERS="+filepath.Join(w.Dir, "none"), 1) + "INFRA_AGENT_SIGNATURE=sigstore\n"
+	content := strings.Replace(string(data), "INFRA_AGENT_SIGNERS="+w.SignersPath, "INFRA_AGENT_SIGNERS="+filepath.Join(w.Dir, "none"), 1) + "INFRA_AGENT_SIGSTORE_REPO_ID=1462297697\nINFRA_AGENT_SIGSTORE_OWNER_ID=165913136\nINFRA_AGENT_SIGNATURE=sigstore\n"
 	envFile = filepath.Join(w.Dir, "sigstore.env")
 	if err := os.WriteFile(envFile, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	code, out, errs := runAgent(t, nil, "check-config", "--env-file", envFile)
-	if code != 0 || !strings.Contains(out, "signature: sigstore\n") || !strings.Contains(out, "sigstore:  trusted root ok (") ||
+	if code != 0 || !strings.Contains(out, "signature: sigstore\n") || !strings.Contains(out, "sigstore:  embedded trusted root ok (") ||
 		!strings.Contains(out, "identity https://github.com/KazuhaHub/infra/.github/workflows/attest-main.yml@refs/heads/main") {
 		t.Errorf("sigstore mode: exit %d\n%s\n%s", code, out, errs)
+	}
+	if !strings.Contains(out, "repo ID 1462297697, owner ID 165913136") || !strings.Contains(out, "sigstore root: embedded\n") {
+		t.Errorf("IDs and root source:\n%s", out)
+	}
+	if info, err := sigstorever.ReadInfo(filepath.Join(w.StateDir, "sigstore-root.json")); err != nil || info.Source != sigstorever.SourceEmbedded {
+		t.Errorf("info %+v %v", info, err)
+	}
+	if _, out, _ := runAgent(t, nil, "status", "--env-file", envFile); !strings.Contains(out, "sigstore root  embedded") {
+		t.Errorf("status:\n%s", out)
+	}
+	if _, out, _ := runAgent(t, nil, "status", "-o", "json", "--env-file", envFile); !strings.Contains(out, `"sigstoreRoot"`) {
+		t.Errorf("status json:\n%s", out)
+	}
+	// The IDs are required in this mode.
+	noIDs := filepath.Join(w.Dir, "noids.env")
+	if err := os.WriteFile(noIDs, []byte(strings.Replace(content, "INFRA_AGENT_SIGSTORE_REPO_ID=1462297697\n", "", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errs := runAgent(t, nil, "check-config", "--env-file", noIDs); code != 2 || !strings.Contains(errs, "SIGSTORE_REPO_ID is required") {
+		t.Errorf("missing ID: exit %d %s", code, errs)
 	}
 	// The same file in ssh mode needs the signers.
 	envFile = filepath.Join(w.Dir, "ssh.env")

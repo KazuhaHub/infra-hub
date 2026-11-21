@@ -8,10 +8,12 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/sigstore/sigstore-go/pkg/bundle"
+	"github.com/sigstore/sigstore-go/pkg/fulcio/certificate"
 	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/sigstore/sigstore-go/pkg/verify"
 )
@@ -56,7 +58,7 @@ func RootSummary() (string, error) {
 }
 
 // Identity is the certificate subject alternative name the signing workflow of repo (owner/name) gets from Fulcio: the
-// workflow reference. It is the same whatever event started the run (push, schedule, workflow_dispatch); the event is a
+// workflow reference (it is also the certificate's build signer URI). It is the same whatever event started the run (push, schedule, workflow_dispatch); the event is a
 // separate certificate extension.
 func Identity(repo string) string {
 	return "https://github.com/" + repo + "/" + Workflow + "@" + Ref
@@ -69,20 +71,61 @@ type Result struct {
 	Time     time.Time // the earliest verified timestamp (the transparency log's integrated time)
 }
 
-// Verify checks that bundleJSON is a Sigstore bundle by identity (certificate issuer Issuer and exactly this subject
-// alternative name) over statement: the signature and the certificate chain against tm, at least one transparency log
-// entry (Rekor) with a verified timestamp, and a signed digest equal to the sha256 of statement. Every error is a
-// reason to reject the bundle.
-func Verify(tm root.TrustedMaterial, bundleJSON, statement []byte, identity string) (*Result, error) {
+// Policy is what the signing certificate must say.
+type Policy struct {
+	// Repo is owner/name of the infra repository; RepoID and OwnerID are the numeric GitHub IDs of the repository and of
+	// its owner (a renamed or re-created repository, or a new owner of the same name, has other IDs).
+	Repo, RepoID, OwnerID string
+	// Commit, when not empty, is the commit the certificate must name as the source digest (the statement's commit).
+	Commit string
+	// Relaxed skips the checks that a throwaway Sigstore cannot satisfy (the certificate extensions beyond the issuer and
+	// the subject name, and the certificate timestamp). Tests only: the agent sets it only when it was given a test root.
+	Relaxed bool
+}
+
+// Verify checks that bundleJSON is a Sigstore bundle by the infra workflow over statement: the signature and the
+// certificate chain against tm; the OIDC issuer and exactly the subject alternative name of Identity(p.Repo); the
+// certificate's source repository, ref, owner, IDs, build signer and runner (a GitHub-hosted one); at least one Rekor
+// entry with a verified timestamp; a signed certificate timestamp (SCT); and a signed digest equal to the sha256 of
+// statement. Every error is a reason to reject the bundle.
+func Verify(tm root.TrustedMaterial, bundleJSON, statement []byte, p Policy) (*Result, error) {
 	var b bundle.Bundle
 	if err := b.UnmarshalJSON(bundleJSON); err != nil {
 		return nil, fmt.Errorf("not a valid Sigstore bundle: %w", err)
 	}
-	v, err := verify.NewVerifier(tm, verify.WithTransparencyLog(1), verify.WithObserverTimestamps(1))
+	opts := []verify.VerifierOption{verify.WithTransparencyLog(1), verify.WithObserverTimestamps(1)}
+	if !p.Relaxed {
+		opts = append(opts, verify.WithSignedCertificateTimestamps(1))
+	}
+	v, err := verify.NewVerifier(tm, opts...)
 	if err != nil {
 		return nil, err
 	}
-	cid, err := verify.NewShortCertificateIdentity(Issuer, "", identity, "")
+	identity := Identity(p.Repo)
+	var ext certificate.Extensions
+	if !p.Relaxed {
+		owner, _, _ := strings.Cut(p.Repo, "/")
+		ext = certificate.Extensions{
+			GithubWorkflowRepository:        p.Repo,
+			SourceRepositoryURI:             "https://github.com/" + p.Repo,
+			SourceRepositoryRef:             Ref,
+			SourceRepositoryOwnerURI:        "https://github.com/" + owner,
+			SourceRepositoryIdentifier:      p.RepoID,
+			SourceRepositoryOwnerIdentifier: p.OwnerID,
+			BuildSignerURI:                  identity,
+			RunnerEnvironment:               "github-hosted",
+			SourceRepositoryDigest:          p.Commit,
+		}
+	}
+	sanM, err := verify.NewSANMatcher(identity, "")
+	if err != nil {
+		return nil, err
+	}
+	issM, err := verify.NewIssuerMatcher(Issuer, "")
+	if err != nil {
+		return nil, err
+	}
+	cid, err := verify.NewCertificateIdentity(sanM, issM, ext)
 	if err != nil {
 		return nil, err
 	}

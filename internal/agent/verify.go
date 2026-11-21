@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"filippo.io/age"
@@ -144,10 +145,18 @@ func (c *capReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// SigstoreMaterial is the trusted material for Sigstore verification: the injected one (tests) or the embedded root.
-func (a *Agent) sigstoreMaterial() (root.TrustedMaterial, error) {
+// sigstoreMaterial is the trusted material for Sigstore verification: the injected one (tests), the root the TUF manager
+// keeps current, or the embedded root.
+func (a *Agent) sigstoreMaterial(ctx context.Context) (root.TrustedMaterial, error) {
 	if a.SigstoreRoot != nil {
 		return a.SigstoreRoot, nil
+	}
+	if a.SigstoreTUF != nil {
+		tr, _, err := a.SigstoreTUF.Root(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return tr, nil
 	}
 	tr, err := sigstorever.EmbeddedRoot()
 	if err != nil {
@@ -157,15 +166,20 @@ func (a *Agent) sigstoreMaterial() (root.TrustedMaterial, error) {
 }
 
 // verifySigstore checks bundle.sigstore.json against the statement and the identity of the infra workflow.
-func (a *Agent) verifySigstore(files bundle.Files) error {
+func (a *Agent) verifySigstore(ctx context.Context, files bundle.Files) error {
 	if len(files.Sigstore) == 0 {
 		return rejectf("the bundle has no %s (the Sigstore signature)", bundle.SigstoreName)
 	}
-	tm, err := a.sigstoreMaterial()
+	tm, err := a.sigstoreMaterial(ctx)
 	if err != nil {
 		return err // this machine's fault: not a reason to call the bundle bad
 	}
-	res, err := sigstorever.Verify(tm, files.Sigstore, files.Statement, sigstorever.Identity(a.Cfg.Repo))
+	pol := sigstorever.Policy{Repo: a.Cfg.Repo, RepoID: a.Cfg.SigstoreRepoID, OwnerID: a.Cfg.SigstoreOwnerID,
+		Relaxed: a.SigstoreRoot != nil} // only a test root is relaxed
+	if st, err := bundle.ParseStatement(files.Statement); err == nil {
+		pol.Commit = st.Commit // the workflow run that signed must be the one that built this commit
+	}
+	res, err := sigstorever.Verify(tm, files.Sigstore, files.Statement, pol)
 	if err != nil {
 		return rejectf("the Sigstore signature in %s does not verify: %v", bundle.SigstoreName, err)
 	}
@@ -182,14 +196,14 @@ func (a *Agent) verifyFiles(ctx context.Context, files bundle.Files) (string, er
 	}
 	switch a.Cfg.Signature {
 	case SigSigstore:
-		if err := a.verifySigstore(files); err != nil {
+		if err := a.verifySigstore(ctx, files); err != nil {
 			return "", err
 		}
 		return SigSigstore, nil
 	case SigEither:
 		var sErr error
 		if len(files.Sigstore) > 0 {
-			if sErr = a.verifySigstore(files); sErr == nil {
+			if sErr = a.verifySigstore(ctx, files); sErr == nil {
 				return SigSigstore, nil
 			}
 			var rj *RejectError
@@ -201,6 +215,7 @@ func (a *Agent) verifyFiles(ctx context.Context, files bundle.Files) (string, er
 		if err == nil {
 			if sErr != nil {
 				slog.Warn("the Sigstore signature is bad, accepted the ssh signature", "err", sErr)
+				a.sigWarn = strings.TrimPrefix(sErr.Error(), "the Sigstore signature in "+bundle.SigstoreName+" ")
 			}
 			return SigSSH, nil
 		}
