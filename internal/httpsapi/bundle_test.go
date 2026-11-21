@@ -62,9 +62,10 @@ func (a *attest) commit(files map[string]string) {
 
 func goodFiles(n int) map[string]string {
 	return map[string]string{
-		"bundle":        statementFor(c40(n), 1790000000+int64(n)),
-		"bundle.sig":    "-----BEGIN SSH SIGNATURE-----\nfake " + fmt.Sprint(n) + "\n-----END SSH SIGNATURE-----\n",
-		"bundle.tar.gz": "\x1f\x8b binary \x00\x01\x02 tarball " + fmt.Sprint(n) + strings.Repeat("\xff", 5000),
+		"bundle":               statementFor(c40(n), 1790000000+int64(n)),
+		"bundle.sig":           "-----BEGIN SSH SIGNATURE-----\nfake " + fmt.Sprint(n) + "\n-----END SSH SIGNATURE-----\n",
+		"bundle.tar.gz":        "\x1f\x8b binary \x00\x01\x02 tarball " + fmt.Sprint(n) + strings.Repeat("\xff", 5000),
+		"bundle.sigstore.json": sigstoreFile,
 	}
 }
 
@@ -156,8 +157,8 @@ func TestBundleServed(t *testing.T) {
 	if strings.Join(names, ",") != "bundle,bundle.sig,bundle.tar.gz" {
 		t.Fatalf("members %v", names)
 	}
-	for n, want := range files {
-		if string(data[n]) != want {
+	for _, n := range names {
+		if string(data[n]) != files[n] {
 			t.Errorf("%s differs", n)
 		}
 	}
@@ -219,7 +220,7 @@ func TestBundleRefusals(t *testing.T) {
 		}
 	}
 	files := goodFiles(2)
-	for _, drop := range []string{"bundle", "bundle.sig", "bundle.tar.gz"} {
+	for _, drop := range []string{"bundle", "bundle.tar.gz", "bundle.sigstore.json"} {
 		f := goodFiles(2)
 		delete(f, drop)
 		a.commit(f)
@@ -242,7 +243,11 @@ func TestBundleRefusals(t *testing.T) {
 	h.s.Bundles.Limits = bundle.Limits{Tarball: 100, Statement: bundle.MaxStatement, Signature: bundle.MaxSignature}
 	want503("tarball over limit", "no_bundle")
 	h.s.Bundles.Limits = bundle.Limits{Tarball: bundle.MaxTarball, Statement: bundle.MaxStatement, Signature: 10}
-	want503("signature over limit", "no_bundle")
+	if r := h.getBundle(t, "GET", "h1", nil); r.code != 406 || errCodeOf(t, r) != "format_unavailable" { // bundle.sig is optional
+		t.Errorf("signature over limit: %d %s", r.code, r.body)
+	}
+	h.s.Bundles.Limits = bundle.Limits{Tarball: bundle.MaxTarball, Statement: bundle.MaxStatement, Signature: bundle.MaxSignature, Sigstore: 10}
+	want503("sigstore bundle over limit", "no_bundle")
 	h.s.Bundles.Limits = bundle.Limits{}
 	if r := h.getBundle(t, "GET", "h1", nil); r.code != 200 {
 		t.Errorf("recovered: %d", r.code)
@@ -317,7 +322,7 @@ func TestBundleCacheFollowsTheBranch(t *testing.T) {
 	}
 	// a branch that breaks stops being served, even though a cache entry exists for the old tip
 	f := goodFiles(3)
-	delete(f, "bundle.sig")
+	delete(f, "bundle.sigstore.json")
 	a.commit(f)
 	if r := h.getBundle(t, "GET", "h1", nil); r.code != 503 {
 		t.Errorf("broken tip: %d", r.code)
@@ -387,26 +392,29 @@ func TestBundleBadTimeIsNoBundle(t *testing.T) {
 
 const sigstoreFile = `{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","fake":true}`
 
-func withSigstore(n int) map[string]string {
-	f := goodFiles(n)
-	f["bundle.sigstore.json"] = sigstoreFile
-	return f
+func withSigstore(n int) map[string]string { return goodFiles(n) }
+
+func fmtHdr(n int) map[string]string { return map[string]string{FormatHeader: fmt.Sprint(n)} }
+
+func v2() map[string]string { return fmtHdr(2) }
+
+func memberNames(t *testing.T, h *testHub, r bundleResp) string {
+	t.Helper()
+	if r.code != 200 {
+		t.Fatalf("%d %s", r.code, r.body)
+	}
+	names, _, _ := members(t, h.ids["h1"], r.body)
+	return strings.Join(names, ",")
 }
 
-func v2() map[string]string { return map[string]string{FormatHeader: "2"} }
-
-// An agent that does not ask for format 2 (every agent before this one) must keep getting exactly three members, even
-// when the branch carries the fourth file: it rejects any other member count.
-func TestBundleDefaultIsThreeFilesEvenWithTheSigstoreFile(t *testing.T) {
-	h := withBundles(t, newAttest(t, withSigstore(1)))
-	for _, hdr := range []map[string]string{nil, {FormatHeader: "1"}} {
+// An agent that does not ask for another format (every agent before v0.14.0) keeps getting exactly the three files it
+// accepts, as long as the branch still has bundle.sig.
+func TestBundleDefaultIsFormat1(t *testing.T) {
+	h := withBundles(t, newAttest(t, goodFiles(1)))
+	for _, hdr := range []map[string]string{nil, fmtHdr(1)} {
 		r := h.getBundle(t, "GET", "h1", hdr)
-		if r.code != 200 {
-			t.Fatalf("%d %s", r.code, r.body)
-		}
-		names, _, _ := members(t, h.ids["h1"], r.body)
-		if strings.Join(names, ",") != "bundle,bundle.sig,bundle.tar.gz" {
-			t.Errorf("header %v: members %v", hdr, names)
+		if got := memberNames(t, h, r); got != "bundle,bundle.sig,bundle.tar.gz" {
+			t.Errorf("header %v: members %v", hdr, got)
 		}
 		if r.header.Get("Vary") != FormatHeader {
 			t.Errorf("Vary %q", r.header.Get("Vary"))
@@ -414,17 +422,15 @@ func TestBundleDefaultIsThreeFilesEvenWithTheSigstoreFile(t *testing.T) {
 	}
 }
 
-func TestBundleFormat2WithTheFourthFile(t *testing.T) {
-	files := withSigstore(1)
+// Format 2 is what an agent of v0.14.0 in signature mode sigstore asks for.
+func TestBundleFormat2HasFourMembers(t *testing.T) {
+	files := goodFiles(1)
 	h := withBundles(t, newAttest(t, files))
 	r := h.getBundle(t, "GET", "h1", v2())
-	if r.code != 200 {
-		t.Fatalf("%d %s", r.code, r.body)
+	if got := memberNames(t, h, r); got != "bundle,bundle.sig,bundle.tar.gz,bundle.sigstore.json" {
+		t.Fatalf("members %v", got)
 	}
-	names, data, hdrs := members(t, h.ids["h1"], r.body)
-	if strings.Join(names, ",") != "bundle,bundle.sig,bundle.tar.gz,bundle.sigstore.json" {
-		t.Fatalf("members %v", names)
-	}
+	_, data, hdrs := members(t, h.ids["h1"], r.body)
 	for n, want := range files {
 		if string(data[n]) != want {
 			t.Errorf("%s differs", n)
@@ -438,11 +444,6 @@ func TestBundleFormat2WithTheFourthFile(t *testing.T) {
 	if r.header.Get("ETag") != `"`+c40(1)+`"` || r.header.Get("Vary") != FormatHeader {
 		t.Errorf("headers %v", r.header)
 	}
-	// A number above 2 is the highest format the hub knows.
-	r5 := h.getBundle(t, "GET", "h1", map[string]string{FormatHeader: "7"})
-	if names, _, _ := members(t, h.ids["h1"], r5.body); len(names) != 4 {
-		t.Errorf("format 7: %v", names)
-	}
 	// 304 does not depend on the format, and says so.
 	r304 := h.getBundle(t, "GET", "h1", map[string]string{FormatHeader: "2", "If-None-Match": `"` + c40(1) + `"`})
 	if r304.code != 304 || r304.header.Get("Vary") != FormatHeader {
@@ -450,52 +451,67 @@ func TestBundleFormat2WithTheFourthFile(t *testing.T) {
 	}
 }
 
-func TestBundleFormat2WithoutTheFourthFileIsThreeFiles(t *testing.T) {
-	h := withBundles(t, newAttest(t, goodFiles(1)))
-	r := h.getBundle(t, "GET", "h1", v2())
-	if r.code != 200 {
-		t.Fatalf("%d %s", r.code, r.body)
+// Format 3 is what agents of v0.15.0 ask for: no ssh signature. A number above 3 is the highest format the hub knows.
+func TestBundleFormat3HasNoSSHSignature(t *testing.T) {
+	files := goodFiles(1)
+	h := withBundles(t, newAttest(t, files))
+	for _, v := range []int{3, 7} {
+		r := h.getBundle(t, "GET", "h1", fmtHdr(v))
+		if got := memberNames(t, h, r); got != "bundle,bundle.tar.gz,bundle.sigstore.json" {
+			t.Fatalf("format %d: members %v", v, got)
+		}
+		_, data, _ := members(t, h.ids["h1"], r.body)
+		for _, n := range []string{"bundle", "bundle.tar.gz", "bundle.sigstore.json"} {
+			if string(data[n]) != files[n] {
+				t.Errorf("%s differs", n)
+			}
+		}
 	}
-	names, _, _ := members(t, h.ids["h1"], r.body)
-	if strings.Join(names, ",") != "bundle,bundle.sig,bundle.tar.gz" {
-		t.Fatalf("members %v", names)
+}
+
+// Once CI stops producing bundle.sig, formats 1 and 2 cannot be made: an older agent gets a clear error, format 3 works.
+func TestBundleWithoutSSHSignature(t *testing.T) {
+	f := goodFiles(1)
+	delete(f, "bundle.sig")
+	h := withBundles(t, newAttest(t, f))
+	for _, hdr := range []map[string]string{nil, fmtHdr(1), v2()} {
+		r := h.getBundle(t, "GET", "h1", hdr)
+		if r.code != 406 || errCodeOf(t, r) != "format_unavailable" {
+			t.Errorf("header %v: %d %s", hdr, r.code, r.body)
+		}
 	}
-	// Both formats are the same archive: built once.
-	h.getBundle(t, "GET", "h1", nil)
-	if h.s.Bundles.builds != 1 {
-		t.Errorf("built %d times", h.s.Bundles.builds)
+	if got := memberNames(t, h, h.getBundle(t, "GET", "h1", fmtHdr(3))); got != "bundle,bundle.tar.gz,bundle.sigstore.json" {
+		t.Errorf("format 3: %v", got)
+	}
+	// The same tip, asked in the other order, still answers each format by its own rule.
+	if r := h.getBundle(t, "GET", "h1", v2()); r.code != 406 {
+		t.Errorf("format 2 after 3: %d", r.code)
+	}
+	// An unchanged bundle is a 304 whatever the format.
+	if r := h.getBundle(t, "GET", "h1", map[string]string{FormatHeader: "2", "If-None-Match": `"` + c40(1) + `"`}); r.code != 304 {
+		t.Errorf("304: %d", r.code)
 	}
 }
 
 func TestBundleFormatsAreCachedApart(t *testing.T) {
-	a := newAttest(t, withSigstore(1))
-	h := withBundles(t, a)
+	h := withBundles(t, newAttest(t, goodFiles(1)))
+	want := map[int]int{1: 3, 2: 4, 3: 3}
 	for i := 0; i < 2; i++ {
-		for _, hdr := range []map[string]string{nil, v2()} {
-			r := h.getBundle(t, "GET", "h1", hdr)
+		for _, f := range []int{1, 2, 3} {
+			r := h.getBundle(t, "GET", "h1", fmtHdr(f))
 			names, _, _ := members(t, h.ids["h1"], r.body)
-			want := 3
-			if hdr != nil {
-				want = 4
-			}
-			if len(names) != want {
-				t.Fatalf("round %d, header %v: %v", i, hdr, names)
+			if len(names) != want[f] {
+				t.Fatalf("round %d, format %d: %v", i, f, names)
 			}
 		}
 	}
-	if h.s.Bundles.builds != 2 || h.s.Bundles.cachedEncrypted() != 2 {
+	if h.s.Bundles.builds != 3 || h.s.Bundles.cachedEncrypted() != 3 {
 		t.Errorf("builds %d, cached %d", h.s.Bundles.builds, h.s.Bundles.cachedEncrypted())
-	}
-	// The fourth file goes away at the next tip: format 2 follows.
-	a.commit(goodFiles(2))
-	r := h.getBundle(t, "GET", "h1", v2())
-	if names, _, _ := members(t, h.ids["h1"], r.body); len(names) != 3 {
-		t.Errorf("after the fourth file is gone: %v", names)
 	}
 }
 
 func TestBundleBadFormatHeader(t *testing.T) {
-	h := withBundles(t, newAttest(t, withSigstore(1)))
+	h := withBundles(t, newAttest(t, goodFiles(1)))
 	for _, v := range []string{"0", "-1", "x", "2.0", "1234"} {
 		r := h.getBundle(t, "GET", "h1", map[string]string{FormatHeader: v})
 		if r.code != 400 || errCodeOf(t, r) != "bad_format" {
@@ -504,19 +520,15 @@ func TestBundleBadFormatHeader(t *testing.T) {
 	}
 }
 
-// The fourth file never makes the bundle unusable: one over its limit is left out of format 2 and format 1 is untouched.
-func TestBundleOversizedFourthFileIsLeftOut(t *testing.T) {
-	f := withSigstore(1)
+// bundle.sigstore.json is required: one over its limit makes the bundle unusable in every format.
+func TestBundleOversizedSigstoreFileIsNoBundle(t *testing.T) {
+	f := goodFiles(1)
 	f["bundle.sigstore.json"] = strings.Repeat("x", 200)
 	h := newHub(t)
 	h.s.Bundles = &Bundles{Repo: newAttest(t, f).repo, Limits: bundle.Limits{Tarball: bundle.MaxTarball, Statement: bundle.MaxStatement, Signature: bundle.MaxSignature, Sigstore: 100}}
-	for _, hdr := range []map[string]string{nil, v2()} {
-		r := h.getBundle(t, "GET", "h1", hdr)
-		if r.code != 200 {
-			t.Fatalf("%d %s", r.code, r.body)
-		}
-		if names, _, _ := members(t, h.ids["h1"], r.body); len(names) != 3 {
-			t.Errorf("header %v: %v", hdr, names)
+	for _, hdr := range []map[string]string{nil, v2(), fmtHdr(3)} {
+		if r := h.getBundle(t, "GET", "h1", hdr); r.code != 503 || errCodeOf(t, r) != "no_bundle" {
+			t.Errorf("header %v: %d %s", hdr, r.code, r.body)
 		}
 	}
 }

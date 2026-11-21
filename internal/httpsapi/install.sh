@@ -239,9 +239,10 @@ EOF
 
 Next steps:
   1. In the infra repository add "$host" to the inventory with the age public key above (and to .sops.yaml), and merge it.
-  2. Copy the signing keys the agent verifies bundles with, roles/infra_agent/files/allowed_signers of the infra
-     repository, to $etc_dir/allowed_signers (root, mode 0600). It must come from you, not from the hub: the hub is
-     not trusted to say who signs.
+  2. Put the numeric GitHub IDs that the signing certificate must carry into $etc_dir/agent.env, from you and not
+     from the hub (the hub is not trusted to say who signs):
+       INFRA_AGENT_SIGSTORE_REPO_ID=<gh api repos/KazuhaHub/infra -q .id>
+       INFRA_AGENT_SIGSTORE_OWNER_ID=<gh api users/KazuhaHub -q .id>
   3. Check:  infra-agent check-config  (the binary is $lib_dir/infra-agent), then
      systemctl enable --now infra-agent
 EOF

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,7 +26,6 @@ const EnvPrefix = "INFRA_AGENT_"
 const (
 	DefaultEnvFile  = "/etc/infra/agent.env"
 	DefaultAgeKey   = "/etc/infra/age.key"
-	DefaultSigners  = "/etc/infra/allowed_signers"
 	DefaultStateDir = "/var/lib/infra-agent"
 	// DefaultGitHubKey and DefaultGitHubKnownHosts are the deploy key and the known_hosts file a hub host already has;
 	// they only matter when INFRA_AGENT_GITHUB_REPO is set.
@@ -46,15 +46,17 @@ const (
 	ModeApply  = "apply"
 )
 
-// Signature modes (INFRA_AGENT_SIGNATURE): which signature of the statement the agent accepts.
+// SigSigstore names the Sigstore keyless signature, the only one the agent verifies. SigSSH is what a state written by
+// an agent older than v0.15.0 may carry as the signature of its verified bundle (the ssh signature, which is no
+// longer verified by anything).
 const (
-	// SigSSH is the ssh signature (bundle.sig against allowed_signers), the default.
-	SigSSH = "ssh"
-	// SigEither accepts a valid Sigstore signature or a valid ssh signature, and prefers Sigstore when the bundle has one.
-	SigEither = "either"
-	// SigSigstore requires the Sigstore signature (bundle.sigstore.json); allowed_signers is not needed.
 	SigSigstore = "sigstore"
+	SigSSH      = "ssh"
 )
+
+// legacySignatureModes are the values of INFRA_AGENT_SIGNATURE that older agents knew. They are still accepted so that
+// a host that is configured with one keeps updating, but the agent always requires the Sigstore signature.
+var legacySignatureModes = []string{"ssh", "either"}
 
 // Settings are the keys that agent.env (and the environment) may carry. Anything else with the prefix is an error.
 var settingKeys = []string{"TOKEN", "HOST", "AGE_KEY", "SIGNERS", "MODE", "SIGNATURE", "SIGSTORE_REPO_ID", "SIGSTORE_OWNER_ID", "INTERVAL", "STATE_DIR", "LOG_FORMAT", "LOG_LEVEL", "GITHUB_REPO", "GITHUB_KEY", "GITHUB_KNOWN_HOSTS", "GITHUB_APP_ID", "GITHUB_APP_KEY"}
@@ -71,18 +73,18 @@ func configErrorf(format string, a ...any) error {
 
 // Config is the validated configuration.
 type Config struct {
-	Token   jointoken.Token
-	Host    string
-	AgeKey  string
-	Signers string
-	Mode    string
-	// Signature is the signature mode: SigSSH, SigEither or SigSigstore.
-	Signature string
+	Token  jointoken.Token
+	Host   string
+	AgeKey string
+	Mode   string
 	// SigstoreRepoID and SigstoreOwnerID are GitHub's numeric IDs of the infra repository and of its owner, which the
-	// signing certificate must carry (required in signature modes either and sigstore).
+	// signing certificate must carry (required).
 	SigstoreRepoID, SigstoreOwnerID string
 	Interval                        time.Duration
 	StateDir                        string
+	// Warnings are deprecation notes about the settings (INFRA_AGENT_SIGNATURE other than sigstore, INFRA_AGENT_SIGNERS);
+	// the command line logs them once at start.
+	Warnings []string
 	// Repo is the repository the bundle statement must name.
 	Repo string
 	// GitHubRepo is the git URL of the repository to fall back to when no hub gives a bundle ("" turns the fallback
@@ -176,7 +178,7 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 		}
 		return vals[name]
 	}
-	c := Config{AgeKey: DefaultAgeKey, Signers: DefaultSigners, Mode: ModeVerify, Signature: SigSSH, Interval: DefaultInterval, StateDir: DefaultStateDir, Repo: DefaultRepo,
+	c := Config{AgeKey: DefaultAgeKey, Mode: ModeVerify, Interval: DefaultInterval, StateDir: DefaultStateDir, Repo: DefaultRepo,
 		GitHubKey: DefaultGitHubKey, GitHubKnownHosts: DefaultGitHubKnownHosts, GitHubAppKey: DefaultGitHubAppKey}
 	tok := get("TOKEN")
 	if tok == "" {
@@ -197,7 +199,7 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 		c.AgeKey = v
 	}
 	if v := get("SIGNERS"); v != "" {
-		c.Signers = v
+		c.Warnings = append(c.Warnings, EnvPrefix+"SIGNERS is ignored: the agent verifies the Sigstore signature only and needs no allowed_signers file")
 	}
 	if v := get("STATE_DIR"); v != "" {
 		c.StateDir = v
@@ -209,10 +211,12 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 		c.Mode = v
 	}
 	if v := get("SIGNATURE"); v != "" {
-		if v != SigSSH && v != SigEither && v != SigSigstore {
-			return c, configErrorf("%sSIGNATURE %q: want ssh, either or sigstore", EnvPrefix, v)
+		if v != SigSigstore && !slices.Contains(legacySignatureModes, v) {
+			return c, configErrorf("%sSIGNATURE %q: want sigstore (ssh and either are accepted but deprecated)", EnvPrefix, v)
 		}
-		c.Signature = v
+		if v != SigSigstore {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("%sSIGNATURE=%s is deprecated: the agent now always requires the Sigstore signature, as with sigstore", EnvPrefix, v))
+		}
 	}
 	for _, k := range []struct {
 		key string
@@ -220,10 +224,7 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 	}{{"SIGSTORE_REPO_ID", &c.SigstoreRepoID}, {"SIGSTORE_OWNER_ID", &c.SigstoreOwnerID}} {
 		v := get(k.key)
 		if v == "" {
-			if c.WantsSigstore() {
-				return c, configErrorf("%s%s is required in signature mode %s (GitHub's numeric ID; `gh api repos/<owner>/<repo> -q .id`, `gh api users/<owner> -q .id`)", EnvPrefix, k.key, c.Signature)
-			}
-			continue
+			return c, configErrorf("%s%s is required (GitHub's numeric ID; `gh api repos/<owner>/<repo> -q .id`, `gh api users/<owner> -q .id`)", EnvPrefix, k.key)
 		}
 		if !idRe.MatchString(v) {
 			return c, configErrorf("%s%s %q is not a number", EnvPrefix, k.key, v)
@@ -273,13 +274,13 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 		}
 	}
 	c.LogFormat, c.LogLevel = get("LOG_FORMAT"), get("LOG_LEVEL")
-	paths := []string{c.AgeKey, c.Signers, c.StateDir}
+	paths := []string{c.AgeKey, c.StateDir}
 	if c.GitHubAppID != "" {
 		paths = append(paths, c.GitHubAppKey)
 	} else if c.GitHubRepo != "" {
 		paths = append(paths, c.GitHubKey, c.GitHubKnownHosts)
 		// These two go into GIT_SSH_COMMAND, which git runs through a shell.
-		for _, p := range paths[3:] {
+		for _, p := range paths[2:] {
 			if strings.HasPrefix(p, "/") && !safePathRe.MatchString(p) {
 				return c, configErrorf("path %q: only letters, digits, . _ - and / are allowed", p)
 			}
@@ -302,25 +303,11 @@ func (c Config) SigstoreManager() *sigstorever.Manager {
 // SigstoreInfoPath is the file in which the manager records which root it chose and when.
 func (c Config) SigstoreInfoPath() string { return filepath.Join(c.StateDir, "sigstore-root.json") }
 
-// WantsSigstore reports whether the agent verifies Sigstore signatures (and so asks for archive format 2).
-func (c Config) WantsSigstore() bool { return c.Signature == SigEither || c.Signature == SigSigstore }
-
-// CheckFiles verifies that the age key and, unless the signature mode is sigstore, the allowed_signers file can be
-// read, and returns the identity.
+// CheckFiles verifies that the age key can be read and returns the identity.
 func (c Config) CheckFiles() (*Identity, error) {
 	id, err := LoadIdentity(c.AgeKey)
 	if err != nil {
 		return nil, &ConfigError{Err: err}
-	}
-	if c.Signature == SigSigstore {
-		return id, nil
-	}
-	st, err := os.Stat(c.Signers)
-	if err != nil {
-		return nil, configErrorf("allowed signers: %v", err)
-	}
-	if !st.Mode().IsRegular() || st.Size() == 0 {
-		return nil, configErrorf("allowed signers %s is not a non-empty regular file", c.Signers)
 	}
 	return id, nil
 }

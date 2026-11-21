@@ -10,11 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"time"
 
 	"filippo.io/age"
 	"github.com/sigstore/sigstore-go/pkg/root"
@@ -22,16 +17,6 @@ import (
 	"github.com/KazuhaHub/infra-hub/internal/bundle"
 	"github.com/KazuhaHub/infra-hub/internal/sigstorever"
 )
-
-// Signature parameters of the contract (docs/bundle.md).
-const (
-	SignerPrincipal = "infra-main"
-	SignerNamespace = "infra-bundle"
-	VerifyTimeout   = 30 * time.Second
-)
-
-// verifyTimeout is VerifyTimeout (a variable so that a test can lower it).
-var verifyTimeout = VerifyTimeout
 
 // RejectError is a bundle that fails a check (signature, hash, format): the cycle result is "rejected".
 type RejectError struct{ Reason string }
@@ -43,9 +28,9 @@ func rejectf(format string, a ...any) error { return &RejectError{Reason: fmt.Sp
 // maxPlain bounds the decrypted archive: four members, their headers and the end marker.
 const maxPlain = bundle.MaxTarball + bundle.MaxStatement + bundle.MaxSignature + bundle.MaxSigstore + 16<<10
 
-// OpenBundle decrypts the hub's answer and returns the files. The archive must hold bundle, bundle.sig and
-// bundle.tar.gz, in that order, and then optionally bundle.sigstore.json (a hub answers with it only to a request for
-// format 2), each a regular file within its limit, and nothing else.
+// OpenBundle decrypts the hub's answer and returns the files. The archive holds bundle, then bundle.sig if the hub is
+// older than v0.15.0 (read and ignored), bundle.tar.gz and bundle.sigstore.json, in that order, each a regular file
+// within its limit, and nothing else. A missing bundle.sigstore.json is not an error here: verification rejects it.
 func OpenBundle(ciphertext io.Reader, id *Identity) (bundle.Files, error) {
 	var f bundle.Files
 	pr, err := age.Decrypt(ciphertext, id.ids...)
@@ -54,55 +39,62 @@ func OpenBundle(ciphertext io.Reader, id *Identity) (bundle.Files, error) {
 	}
 	plain := &capReader{r: pr, left: maxPlain}
 	tr := tar.NewReader(plain)
-	members := []struct {
-		name  string
-		limit int64
-		dst   *[]byte
+	order := []struct {
+		name     string
+		limit    int64
+		dst      *[]byte
+		optional bool
 	}{
-		{bundle.StatementName, bundle.MaxStatement, &f.Statement},
-		{bundle.SignatureName, bundle.MaxSignature, &f.Signature},
-		{bundle.TarballName, bundle.MaxTarball, &f.Tarball},
+		{bundle.StatementName, bundle.MaxStatement, &f.Statement, false},
+		{bundle.SignatureName, bundle.MaxSignature, &f.Signature, true},
+		{bundle.TarballName, bundle.MaxTarball, &f.Tarball, false},
+		{bundle.SigstoreName, bundle.MaxSigstore, &f.Sigstore, true},
 	}
-	for _, m := range members {
-		h, err := tr.Next()
+	next := 0 // the first entry of order that the next member may be
+	var h *tar.Header
+	for {
+		h, err = tr.Next()
 		if err != nil {
-			return f, rejectf("the bundle archive is missing %s: %v", m.name, plainErr(err))
+			break
 		}
-		if h.Name != m.name {
-			return f, rejectf("the bundle archive has member %q where %q is expected", h.Name, m.name)
+		i := next
+		for i < len(order) && order[i].name != h.Name {
+			if !order[i].optional {
+				break
+			}
+			i++
 		}
+		if i >= len(order) || order[i].name != h.Name {
+			if next < len(order) && !order[next].optional {
+				return f, rejectf("the bundle archive has member %q where %q is expected", h.Name, order[next].name)
+			}
+			return f, rejectf("the bundle archive has unexpected member %q", h.Name)
+		}
+		m := order[i]
+		next = i + 1
 		if h.Typeflag != tar.TypeReg {
 			return f, rejectf("bundle member %s is not a regular file", m.name)
 		}
 		if h.Size < 0 || h.Size > m.limit {
 			return f, rejectf("bundle member %s is larger than %d bytes", m.name, m.limit)
 		}
-		data, err := io.ReadAll(io.LimitReader(tr, m.limit+1))
-		if err != nil || int64(len(data)) != h.Size {
-			return f, rejectf("bundle member %s cannot be read: %v", m.name, plainErr(err))
+		data, rerr := io.ReadAll(io.LimitReader(tr, m.limit+1))
+		if rerr != nil || int64(len(data)) != h.Size {
+			return f, rejectf("bundle member %s cannot be read: %v", m.name, plainErr(rerr))
 		}
 		*m.dst = data
 	}
-	h, err := tr.Next()
-	if err == nil {
-		if h.Name != bundle.SigstoreName {
-			return f, rejectf("the bundle archive has member %q where only %s may follow the three files", h.Name, bundle.SigstoreName)
-		}
-		if h.Typeflag != tar.TypeReg {
-			return f, rejectf("bundle member %s is not a regular file", h.Name)
-		}
-		if h.Size < 0 || h.Size > bundle.MaxSigstore {
-			return f, rejectf("bundle member %s is larger than %d bytes", h.Name, bundle.MaxSigstore)
-		}
-		data, rerr := io.ReadAll(io.LimitReader(tr, bundle.MaxSigstore+1))
-		if rerr != nil || int64(len(data)) != h.Size {
-			return f, rejectf("bundle member %s cannot be read: %v", h.Name, plainErr(rerr))
-		}
-		f.Sigstore = data
-		_, err = tr.Next()
-	}
 	if err != io.EOF {
-		return f, rejectf("the bundle archive has more members than it may hold")
+		if f.Statement == nil || f.Tarball == nil {
+			return f, rejectf("the bundle archive is incomplete: %v", plainErr(err))
+		}
+		return f, rejectf("the bundle archive cannot be read: %v", err)
+	}
+	if f.Statement == nil {
+		return f, rejectf("the bundle archive is missing %s", bundle.StatementName)
+	}
+	if f.Tarball == nil {
+		return f, rejectf("the bundle archive is missing %s", bundle.TarballName)
 	}
 	// Read to the end: age authenticates the stream only when its last chunk has been read, and anything after the
 	// archive's end marker must be padding.
@@ -113,6 +105,7 @@ func OpenBundle(ciphertext io.Reader, id *Identity) (bundle.Files, error) {
 	if len(bytes.Trim(rest, "\x00")) != 0 {
 		return f, rejectf("the bundle archive has data after its end")
 	}
+	f.Signature = nil // the legacy ssh signature is not used
 	return f, nil
 }
 
@@ -157,10 +150,7 @@ func (a *Agent) sigstoreMaterial(ctx context.Context) (root.TrustedMaterial, err
 			return nil, err
 		}
 		if info.Fallback {
-			a.rootNote = "sigstore root: " + sigstorever.InfoText(info)
-			if a.Cfg.Signature == SigSigstore {
-				a.rootNote = "WARNING " + a.rootNote
-			}
+			a.rootNote = "WARNING sigstore root: " + sigstorever.InfoText(info)
 			slog.Warn("the Sigstore trusted root is the embedded one", "note", a.rootNote)
 		}
 		return tr, nil
@@ -194,86 +184,13 @@ func (a *Agent) verifySigstore(ctx context.Context, files bundle.Files) error {
 	return nil
 }
 
-// verifyFiles applies the signature mode and returns the signature that verified the statement (SigSSH or
-// SigSigstore). In either mode a Sigstore signature that is there is tried first, and a bad one does not stop a good ssh
-// signature from being accepted.
+// verifyFiles checks the Sigstore signature of the statement and returns SigSigstore. The legacy ssh signature is not
+// looked at.
 func (a *Agent) verifyFiles(ctx context.Context, files bundle.Files) (string, error) {
-	sshCheck := func() error {
-		return VerifySignature(ctx, a.SSHKeygen, a.Cfg.Signers, a.Cfg.StateDir, files.Statement, files.Signature)
-	}
-	switch a.Cfg.Signature {
-	case SigSigstore:
-		if err := a.verifySigstore(ctx, files); err != nil {
-			return "", err
-		}
-		return SigSigstore, nil
-	case SigEither:
-		var sErr error
-		if len(files.Sigstore) > 0 {
-			if sErr = a.verifySigstore(ctx, files); sErr == nil {
-				return SigSigstore, nil
-			}
-			var rj *RejectError
-			if !errors.As(sErr, &rj) {
-				return "", sErr
-			}
-		}
-		err := sshCheck()
-		if err == nil {
-			if sErr == nil { // no Sigstore file at all
-				a.sigWarn = "no " + bundle.SigstoreName + " in the bundle"
-			}
-			if sErr != nil {
-				slog.Warn("the Sigstore signature is bad, accepted the ssh signature", "err", sErr)
-				a.sigWarn = strings.TrimPrefix(sErr.Error(), "the Sigstore signature in "+bundle.SigstoreName+" ")
-			}
-			return SigSSH, nil
-		}
-		var rj *RejectError
-		if sErr != nil && errors.As(err, &rj) {
-			return "", rejectf("%s; %s", sErr.Error(), rj.Reason)
-		}
+	if err := a.verifySigstore(ctx, files); err != nil {
 		return "", err
 	}
-	if err := sshCheck(); err != nil {
-		return "", err
-	}
-	return SigSSH, nil
-}
-
-// VerifySignature runs `ssh-keygen -Y verify` (the tool infra-pull uses) for the statement and its signature against
-// the allowed signers file: principal infra-main, namespace infra-bundle. ssh is the program to run ("ssh-keygen").
-func VerifySignature(ctx context.Context, ssh, signers, tmpDir string, statement, sig []byte) error {
-	dir, err := os.MkdirTemp(tmpDir, ".verify-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(dir)
-	sigPath := filepath.Join(dir, "bundle.sig")
-	if err := os.WriteFile(sigPath, sig, 0o600); err != nil {
-		return err
-	}
-	parent := ctx
-	ctx, cancel := context.WithTimeout(ctx, verifyTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, ssh, "-Y", "verify", "-f", signers, "-I", SignerPrincipal, "-n", SignerNamespace, "-s", sigPath)
-	cmd.Stdin = bytes.NewReader(statement)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
-	if err := cmd.Run(); err != nil {
-		if parent.Err() != nil {
-			return parent.Err()
-		}
-		if ctx.Err() != nil {
-			return fmt.Errorf("ssh-keygen did not finish in %s", verifyTimeout)
-		}
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			return rejectf("the bundle signature does not verify (ssh-keygen exit %d)", ee.ExitCode())
-		}
-		return fmt.Errorf("cannot run %s: %w", ssh, err)
-	}
-	return nil
+	return SigSigstore, nil
 }
 
 // CheckStatement parses the statement and checks it against the tarball and the expected repository.

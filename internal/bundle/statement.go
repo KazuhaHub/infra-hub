@@ -16,25 +16,31 @@ const (
 	MaxTarball   = 64 << 20
 	MaxStatement = 4 << 10
 	MaxSignature = 4 << 10
-	// MaxSigstore bounds the optional bundle.sigstore.json (a Sigstore bundle is about 6 KiB).
+	// MaxSigstore bounds bundle.sigstore.json (a Sigstore bundle is about 6 KiB).
 	MaxSigstore = 64 << 10
 )
 
 // Member names, in the order they appear in the archive.
 const (
 	StatementName = "bundle"
+	// SignatureName is the legacy ssh signature: optional on the branch, no longer verified by anything, kept only to
+	// serve archive formats 1 and 2 to agents of v0.14.0 and older.
 	SignatureName = "bundle.sig"
 	TarballName   = "bundle.tar.gz"
-	// SigstoreName is the optional fourth member, present only in the archive of format 2.
+	// SigstoreName is the Sigstore bundle: required on the branch, a member of the archives of formats 2 and 3.
 	SigstoreName = "bundle.sigstore.json"
 )
 
 // Formats of the archive the hub serves.
 const (
-	// Format1 is the three files; the only one the first agents accept.
+	// Format1 is bundle, bundle.sig and bundle.tar.gz: what the first agents accept. It needs bundle.sig.
 	Format1 = 1
-	// Format2 is the three files and, when the hub has it, bundle.sigstore.json as the fourth member.
+	// Format2 is the three files of format 1 and bundle.sigstore.json as the fourth member (agents of v0.14.0 in
+	// signature mode sigstore). It needs bundle.sig.
 	Format2 = 2
+	// Format3 is bundle, bundle.tar.gz and bundle.sigstore.json (no ssh signature): what agents of v0.15.0 and later
+	// ask for.
+	Format3 = 3
 )
 
 // Statement is the content of the `bundle` file.

@@ -33,19 +33,20 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
 
 ## infra to machine
 
-- **Config bundle.** A tarball of the attested commit of the infra repository, signed by infra's CI
-  (`ssh-keygen -Y sign`, namespace `infra-bundle`; the attestation itself keeps `infra-main`) and encrypted with age
-  to the machine that fetches it. A machine verifies the signature before it applies anything and only moves forward.
-  The format is in [bundle.md](bundle.md). Implemented in phase 3a: `GET /v1/bundle/<host>` reads `bundle`,
-  `bundle.sig` and `bundle.tar.gz` from the tip of `main-attestation` in the mirror, takes the commit from the
-  strictly parsed statement (it verifies neither signature nor hash: the hub is not trusted for integrity), and
-  answers an age-encrypted ustar of the three files with `ETag` and `304`, or `503 no_bundle` / `503 stale_mirror`.
-- **Sigstore keyless signature of the bundle (v0.14.0).** CI can sign the statement `bundle` with cosign keyless (GitHub
-  Actions OIDC, the public-good Fulcio and Rekor) and publish `bundle.sigstore.json` next to the ssh signature. Hubs
-  serve it as a fourth archive member only to agents that ask for archive format 2, so older agents keep getting
-  exactly three files. The agent verifies it with sigstore-go against the public-good trusted root (embedded, refreshed through TUF), pinned to the
-  identity of the `attest-main.yml` workflow of the infra repository on `main`; `INFRA_AGENT_SIGNATURE` (`ssh`,
-  `either`, `sigstore`) selects the accepted signature, so the long-lived CI signing key can be retired in steps. The
+- **Config bundle.** A tarball of the attested commit of the infra repository, signed by infra's CI (a Sigstore keyless
+  signature, below) and encrypted with age to the machine that fetches it. A machine verifies the signature before it
+  applies anything and only moves forward. The format is in [bundle.md](bundle.md). `GET /v1/bundle/<host>` reads
+  `bundle`, `bundle.tar.gz` and `bundle.sigstore.json` from the tip of `main-attestation` in the mirror, takes the commit
+  from the strictly parsed statement (it verifies neither signature nor hash: the hub is not trusted for integrity), and
+  answers an age-encrypted ustar with `ETag` and `304`, or `503 no_bundle` / `503 stale_mirror`.
+- **Sigstore keyless signature of the bundle (v0.14.0; the only signature since v0.15.0).** CI signs the statement
+  `bundle` with cosign keyless (GitHub Actions OIDC, the public-good Fulcio and Rekor) and publishes `bundle.sigstore.json`.
+  The agent verifies it with sigstore-go against the public-good trusted root (embedded, refreshed through TUF), pinned to the
+  identity of the `attest-main.yml` workflow of the infra repository on `main` and to the numeric repository and owner IDs.
+  There are no signing keys to keep or distribute. The earlier ssh signature (`bundle.sig`) is no longer verified by anything; the hub
+  still serves it to agents of v0.14.0 and older (archive formats 1 and 2) for as long as CI publishes it, and a new
+  archive format 3 (no ssh signature) is what v0.15.0 agents ask for, so the key can be retired without a flag day
+  (rollout order in [bundle.md](bundle.md)). The
   reasoning: a signing key in CI secrets can be exfiltrated and used elsewhere, while a keyless signature is only
   issued to a run of that workflow on `main` and is recorded in a public log. The agent binary grows by about 14 MB for
   the verification library; the hub does not link it (it never verifies). See [agent.md](agent.md) and

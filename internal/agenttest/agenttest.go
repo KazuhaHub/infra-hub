@@ -1,5 +1,5 @@
-// Package agenttest is the test bench of infra-agent: a throwaway signing key, an infra repository whose commits are
-// turned into bundles exactly as the CI of KazuhaHub/infra does it (git archive, a statement, ssh-keygen -Y sign), a
+// Package agenttest is the test bench of infra-agent: a throwaway Sigstore, an infra repository whose commits are
+// turned into bundles as the CI of KazuhaHub/infra does it (git archive, a statement, a Sigstore signature), a
 // git mirror holding main-attestation, real hub servers (internal/httpsapi over TLS 1.3 with a pinned identity key),
 // and an ansible-playbook stub.
 package agenttest
@@ -43,14 +43,11 @@ type World struct {
 	Dir          string
 	AgeID        *age.X25519Identity
 	AgeKeyPath   string
-	SignersPath  string
 	StateDir     string
 	Stub         string // the ansible-playbook stub
 	StubLog      string // one line per run: directory|arguments|SOPS_AGE_KEY_FILE
 	StubFail     string // while this file exists the stub exits 3
 	MirrorRepo   string // the git directory the hubs read bundles from
-	signKey      string
-	otherKey     string
 	infra, attst string // work trees
 	n            int
 	published    map[string][4][]byte // commit -> statement, signature, tarball, sigstore bundle, for Republish
@@ -84,13 +81,15 @@ func (s *StaticCerts) Fetch(name string) (certs.CertPayload, error) {
 type Options struct {
 	Time      int64             // statement time; 0 means later than the previous bundle
 	Files     map[string]string // extra files of the infra tree
-	Namespace string            // signature namespace (default infra-bundle)
-	OtherKey  bool              // sign with a key that is not in allowed_signers
+	NoSSH     bool              // leave bundle.sig out (CI no longer produces it)
 	WrongHash bool              // the statement carries the hash of other bytes
 	Repo      string            // statement repo (default KazuhaHub/infra)
 	Tarball   []byte            // use these bytes as bundle.tar.gz instead of git archive (signed all the same)
-	// Sigstore, when set, adds bundle.sigstore.json: a Sigstore signature over the statement with these options.
+	// Sigstore are the options of the Sigstore signature over the statement (nil: a valid signature for the default
+	// repository, workflow and issuer).
 	Sigstore *sigstoretest.Options
+	// NoSigstore leaves bundle.sigstore.json out.
+	NoSigstore bool
 	// SigstoreOver is signed instead of the statement (a digest that does not match).
 	SigstoreOver []byte
 	// SigstoreRaw is published as bundle.sigstore.json as it is (it wins over Sigstore).
@@ -117,10 +116,10 @@ func run(t *testing.T, dir, name string, stdin []byte, args ...string) string {
 	return string(out)
 }
 
-// NewWorld builds the bench. It skips the test when git or ssh-keygen is missing.
+// NewWorld builds the bench. It skips the test when git is missing.
 func NewWorld(t *testing.T) *World {
 	t.Helper()
-	testutil.NeedTool(t, "git", "ssh-keygen")
+	testutil.NeedTool(t, "git")
 	w := &World{T: t, Dir: t.TempDir()}
 	d := w.Dir
 	id, err := age.GenerateX25519Identity()
@@ -131,14 +130,6 @@ func NewWorld(t *testing.T) *World {
 	w.Sigstore = sigstoretest.New(t)
 	w.AgeKeyPath = filepath.Join(d, "age.key")
 	must(t, os.WriteFile(w.AgeKeyPath, []byte("# created: test\n"+id.String()+"\n"), 0o600))
-	w.signKey, w.otherKey = filepath.Join(d, "ci"), filepath.Join(d, "other")
-	for _, k := range []string{w.signKey, w.otherKey} {
-		run(t, d, "ssh-keygen", nil, "-q", "-t", "ed25519", "-N", "", "-C", "test", "-f", k)
-	}
-	pub, err := os.ReadFile(w.signKey + ".pub")
-	must(t, err)
-	w.SignersPath = filepath.Join(d, "allowed_signers")
-	must(t, os.WriteFile(w.SignersPath, []byte(`infra-main namespaces="infra-main,infra-bundle" `+string(pub)), 0o600))
 	w.StateDir = filepath.Join(d, "state")
 	w.infra, w.attst = filepath.Join(d, "infra"), filepath.Join(d, "attest")
 	for _, p := range []string{w.infra, w.attst} {
@@ -203,29 +194,26 @@ func (w *World) Publish(o Options) Published {
 		repo = "KazuhaHub/infra"
 	}
 	stmt := bundle.Statement{Repo: repo, Ref: "refs/heads/main", Commit: commit, Time: tm, SHA256: hex.EncodeToString(sum[:]), Size: int64(len(tarball))}.String()
-	ns, key := o.Namespace, w.signKey
-	if ns == "" {
-		ns = "infra-bundle"
+	// bundle.sig is the legacy ssh signature, which nothing verifies any more: any bytes stand for it.
+	var sig []byte
+	if !o.NoSSH {
+		sig = []byte("legacy ssh signature\n")
 	}
-	if o.OtherKey {
-		key = w.otherKey
-	}
-	stmtPath := filepath.Join(w.Dir, "bundle")
-	must(t, os.WriteFile(stmtPath, []byte(stmt), 0o644))
-	os.Remove(stmtPath + ".sig")
-	run(t, w.Dir, "ssh-keygen", nil, "-Y", "sign", "-n", ns, "-f", key, stmtPath)
-	sig, err := os.ReadFile(stmtPath + ".sig")
-	must(t, err)
 	var sigstore []byte
 	switch {
 	case o.SigstoreRaw != nil:
 		sigstore = o.SigstoreRaw
-	case o.Sigstore != nil:
+	case o.NoSigstore:
+	default:
+		so := sigstoretest.Options{}
+		if o.Sigstore != nil {
+			so = *o.Sigstore
+		}
 		over := []byte(stmt)
 		if o.SigstoreOver != nil {
 			over = o.SigstoreOver
 		}
-		sigstore = w.Sigstore.Sign(over, *o.Sigstore)
+		sigstore = w.Sigstore.Sign(over, so)
 	}
 	if w.published == nil {
 		w.published = map[string][4][]byte{}
@@ -238,7 +226,11 @@ func (w *World) Publish(o Options) Published {
 func (w *World) commitAttestation(stmt, sig, tarball, sigstore []byte) {
 	t := w.T
 	must(t, os.WriteFile(filepath.Join(w.attst, "bundle"), stmt, 0o644))
-	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.sig"), sig, 0o644))
+	if sig != nil {
+		must(t, os.WriteFile(filepath.Join(w.attst, "bundle.sig"), sig, 0o644))
+	} else {
+		os.Remove(filepath.Join(w.attst, "bundle.sig"))
+	}
 	must(t, os.WriteFile(filepath.Join(w.attst, "bundle.tar.gz"), tarball, 0o644))
 	if sigstore != nil {
 		must(t, os.WriteFile(filepath.Join(w.attst, "bundle.sigstore.json"), sigstore, 0o644))
