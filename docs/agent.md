@@ -145,7 +145,7 @@ trusted root (kept current as described below), without contacting Fulcio or Rek
 - its subject alternative name is exactly `https://github.com/<repo>/.github/workflows/attest-main.yml@refs/heads/main`,
   where `<repo>` is the repository the agent is configured for (`KazuhaHub/infra`; the statement must name the same one):
   another repository, another workflow file or another ref (`refs/heads/feature`, a tag) is rejected;
-- the certificate's GitHub extensions agree: build signer URI equal to that name, workflow repository `<repo>`, source
+- the certificate's GitHub extensions agree: build signer URI equal to that name, source
   repository URI `https://github.com/<repo>`, source ref `refs/heads/main`, source repository owner URI
   `https://github.com/<owner>`, the numeric repository and owner IDs from `INFRA_AGENT_SIGSTORE_REPO_ID` and
   `INFRA_AGENT_SIGSTORE_OWNER_ID` (so a deleted and re-created repository, or a new owner of the same name, does not
@@ -157,9 +157,11 @@ trusted root (kept current as described below), without contacting Fulcio or Rek
 The Fulcio certificate lives ten minutes, so the check relies on that logged time, not on the clock of the host: a host
 with a wrong clock still verifies. A reject reason says which check failed (for
 example `the Sigstore signature in bundle.sigstore.json does not verify: ... expected SAN value "..." got "..."`).
-In `either` mode, a Sigstore signature that is present but fails while the ssh signature is accepted is added to the
-cycle's message, which is the report: `...; sigstore: does not verify: <reason>` (at most 140 characters of the reason), so
-the hub sees that a host is not ready for `sigstore` mode. `infra-agent status` shows which signature verified the current
+In `either` mode, every report carries `; sigstore: not verified (<last reason>)` (reason at most 120 characters, kept in
+the state as `sigstoreReason`) for as long as the current verified bundle rests on the ssh signature alone, whether the
+Sigstore file is missing (`no bundle.sigstore.json in the bundle`) or fails (`does not verify: ...`), also in cycles that
+find nothing new, because the hub's alerts see only the latest report of a host. A bundle verified with Sigstore removes it.
+`infra-agent status` shows which signature verified the current
 bundle (`signature ssh` or `signature sigstore`, and `signature` in `-o json`) and where the trusted root came from, and
 `check-config` prints the mode, the identity, whether the embedded trusted root parses, and the root in use. In `sigstore`
 mode the agent also never applies (or re-applies) a bundle whose recorded signature is not Sigstore: it answers
@@ -183,8 +185,10 @@ modes that use Sigstore the agent keeps it current through TUF, the way cosign d
 (`https://tuf-repo-cdn.sigstore.dev`) with the root.json that sigstore-go embeds as the anchor; new metadata must verify
 under that root of trust, so the chain of trust is TUF's own and the repository host is not trusted. The metadata is cached
 in `<state dir>/sigstore-tuf`; the repository is asked at most every 24 hours (and, after a failure, at most every hour),
-with a 60 s limit. When it cannot be reached the cached root is used, and when there is none the root embedded in the binary
-(`internal/sigstorever/trusted_root.json`) is. Which one is in use, and when TUF last refreshed, is in
+with a 60 s limit (a timed-out refresh is waited out before the cache is touched again). When it cannot be reached the
+cached root is used, and when there is none the root embedded in the binary (`internal/sigstorever/trusted_root.json`) is.
+Using the embedded root although a TUF cache existed is a fallback: `status` shows `embedded fallback (TUF unreachable since
+...)` and the cycle's message gets `; sigstore root: embedded fallback (...)`, with a `WARNING` prefix in `sigstore` mode. Which one is in use, and when TUF last refreshed, is in
 `<state dir>/sigstore-root.json`, `status` and `check-config` (`embedded`, `tuf`, `tuf-cache`). The embedded copy is the
 offline floor: a release should refresh it with `go run ./internal/sigstorever/refresh internal/sigstorever/trusted_root.json`
 (TUF-verified too), and `ssh` mode never touches the network for this. Old entries stay in the root with their validity

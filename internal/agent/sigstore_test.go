@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sigstore/sigstore-go/pkg/tuf"
+
 	"github.com/KazuhaHub/infra-hub/internal/agenttest"
 	"github.com/KazuhaHub/infra-hub/internal/bundle"
 	"github.com/KazuhaHub/infra-hub/internal/sigstorever"
@@ -479,12 +481,56 @@ func TestEitherModeReportsAFailedSigstoreSignature(t *testing.T) {
 	if !ok || !strings.Contains(rep.Message, "sigstore: ") {
 		t.Errorf("the hub's report %+v", rep)
 	}
-	// A good Sigstore signature, or none, adds nothing.
+	// A good Sigstore signature adds nothing.
+	w2 := agenttest.NewWorld(t)
+	hub2 := w2.StartHub()
+	w2.Publish(agenttest.Options{Sigstore: goodSigstore()})
+	a2 := sigAgent(t, w2, SigEither, hub2)
+	if o := cycle(t, a2); strings.Contains(o.Message, "sigstore") {
+		t.Errorf("outcome %+v", o)
+	}
+}
+
+// While the current bundle rests on the ssh signature alone, every report in either mode says so, also the ones of
+// cycles that find nothing new, because the hub's alerts see only the latest report of a host.
+func TestEitherModeMarksEveryReportWhileTheBundleIsSSHOnly(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{Sigstore: &sigstoretest.Options{Repo: "Evil/infra"}})
+	a := sigAgent(t, w, SigEither, hub)
+	o := cycle(t, a)
+	if !strings.Contains(o.Message, "; sigstore: not verified (does not verify") {
+		t.Fatalf("first cycle %+v", o)
+	}
+	for i := 0; i < 2; i++ { // 304s: the reason is the one in the state
+		o = cycle(t, a)
+		if o.Result != ResultUnchanged || !strings.HasSuffix(o.Message, ")") || !strings.Contains(o.Message, "; sigstore: not verified (does not verify") {
+			t.Fatalf("later cycle %d: %+v", i, o)
+		}
+		if rep, ok := hub.Report(t); !ok || !strings.Contains(rep.Message, "sigstore: not verified") {
+			t.Errorf("report %+v", rep)
+		}
+	}
+	// No Sigstore file at all: the marker says so.
 	w2 := agenttest.NewWorld(t)
 	hub2 := w2.StartHub()
 	w2.Publish(agenttest.Options{})
-	if o := cycle(t, sigAgent(t, w2, SigEither, hub2)); strings.Contains(o.Message, "sigstore") {
-		t.Errorf("outcome %+v", o)
+	o = cycle(t, sigAgent(t, w2, SigEither, hub2))
+	if !strings.Contains(o.Message, "sigstore: not verified (no bundle.sigstore.json") {
+		t.Errorf("no file: %+v", o)
+	}
+	// The next bundle carries a good Sigstore signature: the marker goes away, and the reason is forgotten.
+	w2.Publish(agenttest.Options{Sigstore: goodSigstore()})
+	o = cycle(t, sigAgent(t, w2, SigEither, hub2))
+	if strings.Contains(o.Message, "sigstore") || mustState(t, w2).SigstoreReason != "" {
+		t.Errorf("after: %+v", o)
+	}
+	// ssh and sigstore modes never add it.
+	w3 := agenttest.NewWorld(t)
+	hub3 := w3.StartHub()
+	w3.Publish(agenttest.Options{})
+	if o := cycle(t, sigAgent(t, w3, SigSSH, hub3)); strings.Contains(o.Message, "sigstore") {
+		t.Errorf("ssh mode: %+v", o)
 	}
 }
 
@@ -547,5 +593,47 @@ func TestRealCIBundleThroughTheAgent(t *testing.T) {
 		if !errors.As(err, &rj) || !strings.Contains(rj.Reason, "Identifier") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// When TUF cannot be reached after a cache existed, the report says that the embedded root was used, and in sigstore
+// mode it says so as a warning.
+func TestEmbeddedRootFallbackIsInTheReport(t *testing.T) {
+	read := func(n string) []byte {
+		b, err := os.ReadFile(filepath.Join("..", "sigstorever", "testdata", n))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	files := bundle.Files{Statement: read("bundle"), Sigstore: read("bundle.sigstore.json")}
+	for _, mode := range []string{SigEither, SigSigstore} {
+		t.Run(mode, func(t *testing.T) {
+			w := agenttest.NewWorld(t)
+			a, _ := newAgentURLs(t, w, ModeVerify, []string{agenttest.DeadURL(t)}, []string{testPin})
+			a.Cfg.Signature, a.Cfg.SigstoreRepoID, a.Cfg.SigstoreOwnerID = mode, "1462297697", "165913136"
+			dir := filepath.Join(w.Dir, "tuf")
+			base := "https://127.0.0.1:1"
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := (&tuf.Config{LastTimestamp: time.Now().AddDate(0, 0, -3)}).Persist(filepath.Join(dir, tuf.URLToPath(base)+".json")); err != nil {
+				t.Fatal(err)
+			}
+			a.SigstoreTUF = &sigstorever.Manager{Dir: dir, BaseURL: base}
+			if err := PrepareDir(a.Cfg.StateDir); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.verifyFiles(context.Background(), files); err != nil {
+				t.Fatal(err)
+			}
+			want := "sigstore root: embedded fallback (TUF unreachable since "
+			if mode == SigSigstore {
+				want = "WARNING " + want
+			}
+			if !strings.HasPrefix(a.rootNote, want) {
+				t.Errorf("note %q", a.rootNote)
+			}
+		})
 	}
 }

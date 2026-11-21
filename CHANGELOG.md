@@ -26,8 +26,9 @@
 - The Sigstore trusted root is refreshed through TUF (public-good repository, embedded root.json as the anchor, cache in
   `<state dir>/sigstore-tuf`, at most daily); without network the cache and then the embedded root are used. `status` and
   `check-config` show the root in use.
-- In `either` mode a failed Sigstore signature next to an accepted ssh signature is added to the report message
-  (`sigstore: ...`).
+- In `either` mode every report carries `sigstore: not verified (<last reason>)` while the current verified bundle rests
+  on the ssh signature alone (the reason is kept in the state). A fallback to the embedded trusted root after a TUF cache
+  existed shows in `status` and in the report message (a warning in `sigstore` mode).
 - In `sigstore` mode a bundle whose recorded signature is not Sigstore is never applied or re-applied.
 - `infra-agent check-config` prints the signature mode and whether the trusted root parses; `infra-agent status` shows
   which signature verified the applied and the verified bundle (`signature` in the state, in `-o json` too).

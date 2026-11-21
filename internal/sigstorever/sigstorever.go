@@ -106,7 +106,6 @@ func Verify(tm root.TrustedMaterial, bundleJSON, statement []byte, p Policy) (*R
 	if !p.Relaxed {
 		owner, _, _ := strings.Cut(p.Repo, "/")
 		ext = certificate.Extensions{
-			GithubWorkflowRepository:        p.Repo,
 			SourceRepositoryURI:             "https://github.com/" + p.Repo,
 			SourceRepositoryRef:             Ref,
 			SourceRepositoryOwnerURI:        "https://github.com/" + owner,

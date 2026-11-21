@@ -152,9 +152,16 @@ func (a *Agent) sigstoreMaterial(ctx context.Context) (root.TrustedMaterial, err
 		return a.SigstoreRoot, nil
 	}
 	if a.SigstoreTUF != nil {
-		tr, _, err := a.SigstoreTUF.Root(ctx)
+		tr, info, err := a.SigstoreTUF.Root(ctx)
 		if err != nil {
 			return nil, err
+		}
+		if info.Fallback {
+			a.rootNote = "sigstore root: " + sigstorever.InfoText(info)
+			if a.Cfg.Signature == SigSigstore {
+				a.rootNote = "WARNING " + a.rootNote
+			}
+			slog.Warn("the Sigstore trusted root is the embedded one", "note", a.rootNote)
 		}
 		return tr, nil
 	}
@@ -213,6 +220,9 @@ func (a *Agent) verifyFiles(ctx context.Context, files bundle.Files) (string, er
 		}
 		err := sshCheck()
 		if err == nil {
+			if sErr == nil { // no Sigstore file at all
+				a.sigWarn = "no " + bundle.SigstoreName + " in the bundle"
+			}
 			if sErr != nil {
 				slog.Warn("the Sigstore signature is bad, accepted the ssh signature", "err", sErr)
 				a.sigWarn = strings.TrimPrefix(sErr.Error(), "the Sigstore signature in "+bundle.SigstoreName+" ")

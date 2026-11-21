@@ -265,3 +265,48 @@ func TestManagerIgnoresARepositoryTheAnchorDoesNotTrust(t *testing.T) {
 		t.Fatalf("%v %+v", err, info)
 	}
 }
+
+func TestManagerReportsTheEmbeddedFallbackAfterACacheExisted(t *testing.T) {
+	r := newTestRepo(t)
+	r.addTarget("trusted_root.json", embeddedRoot)
+	m := newManager(t, r, r.anchor(), "")
+	if _, info, err := m.Root(context.Background()); err != nil || info.Source != SourceTUF || info.Fallback {
+		t.Fatalf("%v %+v", err, info)
+	}
+	// The cache becomes unreadable and the network is gone: the embedded root, flagged as a fallback.
+	if err := os.RemoveAll(filepath.Join(m.Dir, tuf.URLToPath(m.BaseURL))); err != nil {
+		t.Fatal(err)
+	}
+	r.down.Store(true)
+	m2 := newManager(t, r, r.anchor(), m.Dir)
+	_, info, err := m2.Root(context.Background())
+	if err != nil || info.Source != SourceEmbedded || !info.Fallback || info.Since.IsZero() {
+		t.Fatalf("%v %+v", err, info)
+	}
+	if got := InfoText(info); !strings.Contains(got, "embedded fallback (TUF unreachable since ") {
+		t.Errorf("text %q", got)
+	}
+	if got, _ := ReadInfo(m2.InfoPath); !got.Fallback {
+		t.Errorf("info file %+v", got)
+	}
+}
+
+// A refresh that outlived its timeout may still be writing the cache: nothing reads or refreshes it until it has ended.
+func TestManagerLeavesTheCacheAloneWhileARefreshIsRunning(t *testing.T) {
+	r := newTestRepo(t)
+	r.addTarget("trusted_root.json", embeddedRoot)
+	m := newManager(t, r, r.anchor(), "")
+	running := make(chan struct{})
+	m.inflight = running
+	before := r.calls.Load()
+	if _, _, err := m.Root(context.Background()); err == nil {
+		t.Fatal("a root without a running refresh to wait for")
+	}
+	if r.calls.Load() != before {
+		t.Error("the repository was asked while a refresh was running")
+	}
+	close(running)
+	if _, info, err := m.Root(context.Background()); err != nil || info.Source != SourceTUF {
+		t.Fatalf("%v %+v", err, info)
+	}
+}

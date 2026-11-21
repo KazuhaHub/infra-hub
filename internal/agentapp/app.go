@@ -469,13 +469,7 @@ func (c *cli) newCheckConfig() *cobra.Command {
 // sigstoreManager is the TUF-backed trusted root of a configuration (a variable so that tests stay off the network).
 var sigstoreManager = func(cfg agent.Config) *sigstorever.Manager { return cfg.SigstoreManager() }
 
-// rootInfoText says where the trusted root came from and how old that is.
-func rootInfoText(i sigstorever.Info) string {
-	if i.Updated.IsZero() {
-		return i.Source
-	}
-	return fmt.Sprintf("%s, TUF metadata refreshed %s (%s ago)", i.Source, i.Updated.UTC().Format(time.RFC3339), time.Since(i.Updated).Round(time.Minute))
-}
+func rootInfoText(i sigstorever.Info) string { return sigstorever.InfoText(i) }
 
 func hostPort(u string) string {
 	if p, err := url.Parse(u); err == nil {

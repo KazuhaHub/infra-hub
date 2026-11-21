@@ -47,6 +47,10 @@ type Info struct {
 	Updated time.Time `json:"updated,omitempty"`
 	// Checked is when the manager last chose the root.
 	Checked time.Time `json:"checked"`
+	// Fallback is set when the embedded root is used although a TUF cache existed: TUF could not be reached or its cache
+	// could not be read. Since is when TUF last refreshed (the cache's age).
+	Fallback bool      `json:"fallback,omitempty"`
+	Since    time.Time `json:"since,omitempty"`
 }
 
 // ReadInfo reads the file the manager wrote (an error when there is none).
@@ -78,6 +82,9 @@ type Manager struct {
 	cur    *root.TrustedRoot
 	info   Info
 	nextAt time.Time // no refresh before this
+	// inflight is closed when the last online attempt, which may outlive its timeout, has ended; the cache directory is
+	// not touched (read or refreshed) before that.
+	inflight <-chan struct{}
 }
 
 // NewManager is a manager for the public-good repository.
@@ -142,19 +149,28 @@ func (m *Manager) options() *tuf.Options {
 
 func (m *Manager) refresh(ctx context.Context) (*root.TrustedRoot, Info, error) {
 	now := m.now()
-	if m.Offline {
-		// fall through to the embedded root
-	} else if err := os.MkdirAll(m.Dir, 0o700); err == nil {
-		// A fresh cache (younger than a day) is used without the network; an older one is refreshed.
-		if data, err := fromTUF(ctx, m.options()); err == nil {
-			if tr, err := root.NewTrustedRootFromJSON(data); err == nil {
-				return tr, Info{Source: SourceTUF, Updated: m.lastUpdate(), Checked: now}, nil
+	cached := false
+	if !m.Offline && m.busy() {
+		// An earlier attempt is still running in the background: leave the cache alone this time.
+		return nil, Info{}, errors.New("an earlier TUF refresh is still running")
+	}
+	if !m.Offline {
+		if err := os.MkdirAll(m.Dir, 0o700); err == nil {
+			cached = !m.lastUpdate().IsZero()
+			// A fresh cache (younger than a day) is used without the network; an older one is refreshed.
+			data, timedOut, err := m.fromTUF(ctx, m.options())
+			if err == nil {
+				if tr, err := root.NewTrustedRootFromJSON(data); err == nil {
+					return tr, Info{Source: SourceTUF, Updated: m.lastUpdate(), Checked: now}, nil
+				}
 			}
-		}
-		// No network or a bad answer: the cache as it is.
-		if data, err := fromTUF(ctx, m.options().WithForceCache()); err == nil {
-			if tr, err := root.NewTrustedRootFromJSON(data); err == nil {
-				return tr, Info{Source: SourceTUFCache, Updated: m.lastUpdate(), Checked: now}, nil
+			if !timedOut {
+				// No network or a bad answer: the cache as it is.
+				if data, _, err := m.fromTUF(ctx, m.options().WithForceCache()); err == nil {
+					if tr, err := root.NewTrustedRootFromJSON(data); err == nil {
+						return tr, Info{Source: SourceTUFCache, Updated: m.lastUpdate(), Checked: now}, nil
+					}
+				}
 			}
 		}
 	}
@@ -162,7 +178,23 @@ func (m *Manager) refresh(ctx context.Context) (*root.TrustedRoot, Info, error) 
 	if err != nil {
 		return nil, Info{}, err
 	}
-	return tr, Info{Source: SourceEmbedded, Checked: now}, nil
+	info := Info{Source: SourceEmbedded, Checked: now}
+	if cached {
+		info.Fallback, info.Since = true, m.lastUpdate()
+	}
+	return tr, info, nil
+}
+
+func (m *Manager) busy() bool {
+	if m.inflight == nil {
+		return false
+	}
+	select {
+	case <-m.inflight:
+		return false
+	default:
+		return true
+	}
 }
 
 // lastUpdate is when TUF last refreshed the cache (the library's own record; zero if unknown).
@@ -178,8 +210,10 @@ func (m *Manager) lastUpdate() time.Time {
 	return cfg.LastTimestamp
 }
 
-// fromTUF reads the trusted root target through a TUF client, within FetchTimeout and ctx.
-func fromTUF(ctx context.Context, o *tuf.Options) ([]byte, error) {
+// fromTUF reads the trusted root target through a TUF client, within FetchTimeout and ctx. When the time is up the
+// attempt is cancelled but may still be running: timedOut is true, and m.inflight says when it has ended, so that
+// nothing else reads or writes the cache meanwhile.
+func (m *Manager) fromTUF(ctx context.Context, o *tuf.Options) (data []byte, timedOut bool, err error) {
 	ctx, cancel := context.WithTimeout(ctx, FetchTimeout)
 	defer cancel()
 	type result struct {
@@ -187,7 +221,9 @@ func fromTUF(ctx context.Context, o *tuf.Options) ([]byte, error) {
 		err  error
 	}
 	ch := make(chan result, 1)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		c, err := tuf.New(o.WithContext(ctx))
 		if err != nil {
 			ch <- result{nil, err}
@@ -198,8 +234,21 @@ func fromTUF(ctx context.Context, o *tuf.Options) ([]byte, error) {
 	}()
 	select {
 	case r := <-ch:
-		return r.data, r.err
+		<-done
+		return r.data, false, r.err
 	case <-ctx.Done():
-		return nil, errors.New("the TUF refresh did not finish in time")
+		m.inflight = done
+		return nil, true, errors.New("the TUF refresh did not finish in time")
 	}
+}
+
+// InfoText says where the trusted root came from and how old that is.
+func InfoText(i Info) string {
+	switch {
+	case i.Fallback:
+		return fmt.Sprintf("embedded fallback (TUF unreachable since %s)", i.Since.UTC().Format(time.RFC3339))
+	case i.Updated.IsZero():
+		return i.Source
+	}
+	return fmt.Sprintf("%s, TUF metadata refreshed %s (%s ago)", i.Source, i.Updated.UTC().Format(time.RFC3339), time.Since(i.Updated).Round(time.Minute))
 }

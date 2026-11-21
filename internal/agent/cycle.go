@@ -69,6 +69,8 @@ type Agent struct {
 	SigstoreTUF *sigstorever.Manager
 	// sigWarn is a Sigstore signature that failed while the ssh signature was accepted (either mode), for the report.
 	sigWarn string
+	// rootNote is a note about the Sigstore trusted root (the embedded fallback) for the report.
+	rootNote string
 	// SSHKeygen and Ansible are the programs to run (defaults ssh-keygen and ansible-playbook, found through PATH).
 	SSHKeygen, Ansible string
 	// InfraLock and InfraApplied are infra-pull's lock and applied record; LockTimeout bounds the wait for the lock.
@@ -179,6 +181,7 @@ func (a *Agent) Cycle(ctx context.Context) (Outcome, error) {
 	}
 	a.floor = 0
 	a.sigWarn = ""
+	a.rootNote = ""
 	var o Outcome
 	var served *Hub
 	var rejs []rejection
@@ -204,9 +207,23 @@ func (a *Agent) Cycle(ctx context.Context) (Outcome, error) {
 		slog.Info("interrupted", "host", a.Cfg.Host, "result", o.Result)
 		return o, fmt.Errorf("%w: %v", ErrInterrupted, ctx.Err())
 	}
-	if a.sigWarn != "" && o.Result != ResultRejected {
-		// The bundle was accepted with the ssh signature although its Sigstore signature failed: say so in the report.
-		o.Message += "; sigstore: " + truncate(a.sigWarn, 140)
+	if a.sigWarn != "" {
+		st.SigstoreReason = a.sigWarn
+	}
+	if st.Verified != nil && st.Verified.Signature == SigSigstore {
+		st.SigstoreReason = ""
+	}
+	if cfg := a.Cfg; cfg.Signature == SigEither && st.Verified != nil && st.Verified.Signature != SigSigstore && o.Result != ResultRejected {
+		// Every report says that the current bundle rests on the ssh signature alone, so that the hub's alerts, which see
+		// only the latest report of a host, notice it.
+		reason := st.SigstoreReason
+		if reason == "" {
+			reason = "no Sigstore signature seen"
+		}
+		o.Message += "; sigstore: not verified (" + truncate(reason, 120) + ")"
+	}
+	if a.rootNote != "" {
+		o.Message += "; " + a.rootNote
 	}
 	o.Message = truncate(o.Message, MaxMessage)
 	st.LastResult, st.LastMessage, st.LastHub = o.Result, o.Message, o.Hub
