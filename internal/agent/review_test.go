@@ -82,7 +82,8 @@ func TestApplyWaitsForInfraPullsLock(t *testing.T) {
 	}
 	// Released while the agent waits: it gets the lock and applies.
 	a.LockTimeout = 5 * time.Second
-	go func() { time.Sleep(400 * time.Millisecond); held.Close() }()
+	first := held
+	go func() { time.Sleep(400 * time.Millisecond); first.Close() }()
 	if o := cycle(t, a); o.Result != ResultOK || o.AppliedCommit != p.Commit {
 		t.Fatalf("after release: %+v", o)
 	}
@@ -197,7 +198,7 @@ func bundleBody(t *testing.T, w *agenttest.World) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, err := bundle.Archive(l.Files, time.Unix(l.Statement.Time, 0), bundle.Format1)
+	plain, err := bundle.Archive(l.Files, time.Unix(l.Statement.Time, 0), bundle.Format3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -418,40 +419,6 @@ func TestContentConflictsAreRejectedAndLocalFaultsAreNot(t *testing.T) {
 		t.Errorf("a local permission fault was blamed on the bundle: %v", err)
 	}
 }
-
-func TestSignatureToolFailuresAreClassified(t *testing.T) {
-	dir := t.TempDir()
-	script := func(name, body string) string {
-		p := filepath.Join(dir, name)
-		os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o755)
-		return p
-	}
-	// A verification failure is a rejection; a tool that hangs or cannot run is a local fault.
-	if err := VerifySignature(context.Background(), script("no", "exit 255"), "/x", dir, []byte("s"), []byte("g")); !isReject(err) {
-		t.Errorf("exit 255: %v", err)
-	}
-	old := verifyTimeout
-	verifyTimeout = 200 * time.Millisecond
-	defer func() { verifyTimeout = old }()
-	err := VerifySignature(context.Background(), script("slow", "exec sleep 5"), "/x", dir, []byte("s"), []byte("g"))
-	if err == nil || isReject(err) {
-		t.Errorf("timeout: %v", err)
-	}
-	if err := VerifySignature(context.Background(), filepath.Join(dir, "missing"), "/x", dir, []byte("s"), []byte("g")); err == nil || isReject(err) {
-		t.Errorf("missing tool: %v", err)
-	}
-	// In a cycle the timeout is result failed, and nothing is extracted.
-	w := agenttest.NewWorld(t)
-	hub := w.StartHub()
-	w.Publish(agenttest.Options{})
-	a, _ := newAgent(t, w, ModeApply, hub)
-	a.SSHKeygen = script("slow2", "exec sleep 5")
-	if o := cycle(t, a); o.Result != ResultFailed || len(releases(t, w)) != 0 {
-		t.Errorf("%+v", o)
-	}
-}
-
-func isReject(err error) bool { _, ok := err.(*RejectError); return ok }
 
 func TestApplyKillsTheWholeProcessGroup(t *testing.T) {
 	dir := t.TempDir()

@@ -21,12 +21,10 @@ import (
 	"github.com/KazuhaHub/infra-hub/internal/sigstorever/sigstoretest"
 )
 
-// sigAgent is newAgent with a signature mode and the world's throwaway Sigstore as the trusted root.
-func sigAgent(t *testing.T, w *agenttest.World, sig string, hubs ...*agenttest.Hub) *Agent {
+// sigAgent is an agent whose trusted root is the world's throwaway Sigstore.
+func sigAgent(t *testing.T, w *agenttest.World, hubs ...*agenttest.Hub) *Agent {
 	t.Helper()
 	a, _ := newAgent(t, w, ModeVerify, hubs...)
-	a.Cfg.Signature = sig
-	a.SigstoreRoot = w.Sigstore.TrustedMaterial()
 	return a
 }
 
@@ -35,9 +33,9 @@ func goodSigstore() *sigstoretest.Options { return &sigstoretest.Options{} }
 func TestSigstoreModeAcceptsAValidBundle(t *testing.T) {
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
-	// The ssh signature is by a key nobody trusts: only the Sigstore signature can carry this bundle.
-	p := w.Publish(agenttest.Options{OtherKey: true, Sigstore: goodSigstore()})
-	a := sigAgent(t, w, SigSigstore, hub)
+	// CI no longer produces bundle.sig: the Sigstore signature alone carries the bundle.
+	p := w.Publish(agenttest.Options{NoSSH: true})
+	a := sigAgent(t, w, hub)
 	o := cycle(t, a)
 	if o.Result != ResultVerified || o.Hub != hub.URL {
 		t.Fatalf("outcome %+v", o)
@@ -73,14 +71,13 @@ func TestSigstoreModeRejections(t *testing.T) {
 		{"no transparency log entry", agenttest.Options{Sigstore: &sigstoretest.Options{NoTlog: true}}, nil, "", "does not verify"},
 		{"unknown trusted root", agenttest.Options{Sigstore: goodSigstore()}, other, "", "does not verify"},
 		{"not a bundle", agenttest.Options{SigstoreRaw: []byte("{}")}, nil, "", "not a valid Sigstore bundle"},
-		{"no file", agenttest.Options{}, nil, "", "no bundle.sigstore.json"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			w := agenttest.NewWorld(t)
 			hub := w.StartHub()
-			w.Publish(c.opts) // the ssh signature is valid: sigstore mode must not fall back to it
-			a := sigAgent(t, w, SigSigstore, hub)
+			w.Publish(c.opts) // a bundle.sig is there: nothing falls back to it
+			a := sigAgent(t, w, hub)
 			if c.root != nil {
 				a.SigstoreRoot = c.root.TrustedMaterial()
 			}
@@ -108,11 +105,24 @@ func TestSigstoreModeRejections(t *testing.T) {
 	}
 }
 
+// A bundle that the hub serves without bundle.sigstore.json (an archive of format 1) fails verification with a clear reason.
+func TestNoSigstoreFileIsRejected(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	w.Publish(agenttest.Options{NoSigstore: true})
+	l := bundle.Files{Statement: []byte("x"), Tarball: []byte("y")}
+	a, _ := newAgentURLs(t, w, ModeVerify, []string{agenttest.DeadURL(t)}, []string{testPin})
+	_, err := a.verifyFiles(context.Background(), l)
+	var rj *RejectError
+	if !errors.As(err, &rj) || !strings.Contains(rj.Reason, "no bundle.sigstore.json") {
+		t.Fatalf("%v", err)
+	}
+}
+
 func TestSigstoreIdentityFollowsTheConfiguredRepository(t *testing.T) {
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
 	w.Publish(agenttest.Options{Repo: "Org/other-infra", Sigstore: &sigstoretest.Options{Repo: "Org/other-infra"}})
-	a := sigAgent(t, w, SigSigstore, hub)
+	a := sigAgent(t, w, hub)
 	a.Cfg.Repo = "Org/other-infra"
 	if o := cycle(t, a); o.Result != ResultVerified {
 		t.Fatalf("%+v", o)
@@ -121,126 +131,50 @@ func TestSigstoreIdentityFollowsTheConfiguredRepository(t *testing.T) {
 	w2 := agenttest.NewWorld(t)
 	hub2 := w2.StartHub()
 	w2.Publish(agenttest.Options{Repo: "Org/other-infra", Sigstore: &sigstoretest.Options{Repo: "KazuhaHub/infra"}})
-	a2 := sigAgent(t, w2, SigSigstore, hub2)
+	a2 := sigAgent(t, w2, hub2)
 	a2.Cfg.Repo = "Org/other-infra"
 	if o := cycle(t, a2); o.Result != ResultRejected {
 		t.Fatalf("%+v", o)
 	}
 }
 
-func TestSSHModeIgnoresTheSigstoreFile(t *testing.T) {
-	for name, o := range map[string]agenttest.Options{
-		"valid":   {Sigstore: goodSigstore()},
-		"garbage": {SigstoreRaw: []byte("garbage")},
-		"wrong":   {Sigstore: &sigstoretest.Options{Repo: "Evil/infra"}},
-	} {
-		t.Run(name, func(t *testing.T) {
-			w := agenttest.NewWorld(t)
-			hub := w.StartHub()
-			w.Publish(o)
-			a := sigAgent(t, w, SigSSH, hub)
-			if res := cycle(t, a); res.Result != ResultVerified {
-				t.Fatalf("%+v", res)
-			}
-			if st := mustState(t, w); st.Verified.Signature != SigSSH {
-				t.Errorf("signature %q", st.Verified.Signature)
-			}
-		})
-	}
-	// With an ssh signature that does not verify, a good Sigstore file does not help in ssh mode.
+// Agents of v0.15.0 verify the Sigstore signature only. The legacy ssh signature may be there, be absent, or be
+// garbage: it is never looked at, and a valid one does not save a bundle whose Sigstore signature is bad.
+func TestTheSSHSignatureIsNeverConsulted(t *testing.T) {
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
-	w.Publish(agenttest.Options{OtherKey: true, Sigstore: goodSigstore()})
-	if res := cycle(t, sigAgent(t, w, SigSSH, hub)); res.Result != ResultRejected {
+	w.Publish(agenttest.Options{})
+	if res := cycle(t, sigAgent(t, w, hub)); res.Result != ResultVerified {
+		t.Fatalf("%+v", res)
+	}
+	if st := mustState(t, w); st.Verified.Signature != SigSigstore {
+		t.Errorf("signature %q", st.Verified.Signature)
+	}
+	// A bad Sigstore signature next to a bundle.sig is a rejection.
+	w2 := agenttest.NewWorld(t)
+	hub2 := w2.StartHub()
+	w2.Publish(agenttest.Options{Sigstore: &sigstoretest.Options{Repo: "Evil/infra"}})
+	if res := cycle(t, sigAgent(t, w2, hub2)); res.Result != ResultRejected {
 		t.Fatalf("%+v", res)
 	}
 }
 
-func TestEitherMode(t *testing.T) {
-	cases := []struct {
-		name   string
-		opts   agenttest.Options
-		result string
-		sig    string
-	}{
-		{"ssh only", agenttest.Options{}, ResultVerified, SigSSH},
-		{"both valid prefers sigstore", agenttest.Options{Sigstore: goodSigstore()}, ResultVerified, SigSigstore},
-		{"sigstore only valid", agenttest.Options{OtherKey: true, Sigstore: goodSigstore()}, ResultVerified, SigSigstore},
-		{"bad sigstore, valid ssh", agenttest.Options{Sigstore: &sigstoretest.Options{Repo: "Evil/infra"}}, ResultVerified, SigSSH},
-		{"garbage sigstore, valid ssh", agenttest.Options{SigstoreRaw: []byte("x")}, ResultVerified, SigSSH},
-		{"both bad", agenttest.Options{OtherKey: true, Sigstore: &sigstoretest.Options{Repo: "Evil/infra"}}, ResultRejected, ""},
-		{"bad ssh, no sigstore", agenttest.Options{OtherKey: true}, ResultRejected, ""},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			w := agenttest.NewWorld(t)
-			hub := w.StartHub()
-			w.Publish(c.opts)
-			a := sigAgent(t, w, SigEither, hub)
-			o := cycle(t, a)
-			if o.Result != c.result {
-				t.Fatalf("outcome %+v", o)
-			}
-			if c.sig != "" {
-				if st := mustState(t, w); st.Verified == nil || st.Verified.Signature != c.sig {
-					t.Errorf("state %+v", st.Verified)
-				}
-			}
-		})
-	}
-}
-
-func TestEitherModeRejectionNamesBothSignatures(t *testing.T) {
-	w := agenttest.NewWorld(t)
-	w.Publish(agenttest.Options{OtherKey: true, Sigstore: &sigstoretest.Options{Repo: "Evil/infra"}})
-	a, _ := newAgentURLs(t, w, ModeVerify, []string{agenttest.DeadURL(t)}, []string{testPin})
-	a.Cfg.Signature, a.SigstoreRoot = SigEither, w.Sigstore.TrustedMaterial()
-	if err := PrepareDir(a.Cfg.StateDir); err != nil {
-		t.Fatal(err)
-	}
-	l, err := bundle.Load(context.Background(), w.MirrorRepo, bundle.DefaultLimits)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = a.verifyFiles(context.Background(), l.Files)
-	var rj *RejectError
-	if !errors.As(err, &rj) || !strings.Contains(rj.Reason, "Sigstore signature") || !strings.Contains(rj.Reason, "ssh-keygen") {
-		t.Fatalf("%v", err)
-	}
-	t.Log(rj.Reason)
-}
-
-func TestSigstoreModeRecheckesABundleVerifiedWithSSH(t *testing.T) {
+// An agent that an older agent left a state with a bundle that was verified with the ssh signature asks again and
+// refuses to apply it until it has been seen with its Sigstore signature.
+func TestABundleVerifiedWithSSHIsCheckedAgain(t *testing.T) {
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
 	p := w.Publish(agenttest.Options{})
-	if o := cycle(t, sigAgent(t, w, SigSSH, hub)); o.Result != ResultVerified {
+	a := sigAgent(t, w, hub)
+	if o := cycle(t, a); o.Result != ResultVerified {
 		t.Fatalf("%+v", o)
 	}
-	// Same commit, same hub: a 304 would keep the ssh-verified bundle for good. Sigstore mode asks again and finds no
-	// Sigstore signature.
-	o := cycle(t, sigAgent(t, w, SigSigstore, hub))
-	if o.Result != ResultRejected {
-		t.Fatalf("%+v", o)
+	st := mustState(t, w)
+	st.Verified.Signature = SigSSH // what agents before v0.15.0 wrote
+	if err := st.Save(w.StateDir); err != nil {
+		t.Fatal(err)
 	}
-	if st := mustState(t, w); st.Verified.Commit != p.Commit || st.Verified.Signature != SigSSH {
-		t.Errorf("state %+v", st.Verified)
-	}
-}
-
-func TestSameBundleSeenAgainWithSigstoreIsRecordedAsSigstore(t *testing.T) {
-	w := agenttest.NewWorld(t)
-	hub := w.StartHub()
-	p := w.Publish(agenttest.Options{Sigstore: goodSigstore()})
-	// Verified with ssh first (an agent that has not been switched yet), then seen with sigstore in either mode.
-	if o := cycle(t, sigAgent(t, w, SigSSH, hub)); o.Result != ResultVerified {
-		t.Fatalf("%+v", o)
-	}
-	o := cycle(t, sigAgent(t, w, SigEither, hub)) // a 304: nothing to learn
-	if o.Result != ResultUnchanged {
-		t.Fatalf("%+v", o)
-	}
-	a := sigAgent(t, w, SigSigstore, hub) // asks again: gets the same bundle with its Sigstore signature
+	// Same commit, same hub: a 304 would keep the ssh-verified bundle for good. The agent asks again.
 	if o := cycle(t, a); o.Result != ResultUnchanged {
 		t.Fatalf("%+v", o)
 	}
@@ -252,10 +186,8 @@ func TestSameBundleSeenAgainWithSigstoreIsRecordedAsSigstore(t *testing.T) {
 func TestAppliedRecordKeepsTheSignature(t *testing.T) {
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
-	w.Publish(agenttest.Options{Sigstore: goodSigstore()})
+	w.Publish(agenttest.Options{})
 	a, _ := newAgent(t, w, ModeApply, hub)
-	a.Cfg.Signature = SigSigstore
-	a.SigstoreRoot = w.Sigstore.TrustedMaterial()
 	if o := cycle(t, a); o.Result != ResultOK {
 		t.Fatalf("%+v", o)
 	}
@@ -267,47 +199,25 @@ func TestAppliedRecordKeepsTheSignature(t *testing.T) {
 func TestSigstoreNeedsNoAllowedSigners(t *testing.T) {
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
-	w.Publish(agenttest.Options{OtherKey: true, Sigstore: goodSigstore()})
-	var urls, pins = []string{hub.URL}, []string{hub.Pin}
+	w.Publish(agenttest.Options{NoSSH: true})
 	vals := map[string]string{
-		"INFRA_AGENT_TOKEN":     agenttest.Token(t, pins, urls),
+		"INFRA_AGENT_TOKEN":     agenttest.Token(t, []string{hub.Pin}, []string{hub.URL}),
 		"INFRA_AGENT_HOST":      agenttest.Host,
 		"INFRA_AGENT_AGE_KEY":   w.AgeKeyPath,
-		"INFRA_AGENT_SIGNERS":   filepath.Join(w.Dir, "no-such-file"),
 		"INFRA_AGENT_STATE_DIR": w.StateDir,
 	}
+	if _, err := FromValues(vals, nil); !isConfigError(err) || !strings.Contains(err.Error(), "SIGSTORE_REPO_ID is required") {
+		t.Fatalf("without the IDs: %v", err)
+	}
+	vals["INFRA_AGENT_SIGSTORE_REPO_ID"], vals["INFRA_AGENT_SIGSTORE_OWNER_ID"] = "1462297697", "165913136"
+	// The retired settings are accepted: a host that still has them keeps updating.
+	vals["INFRA_AGENT_SIGNATURE"], vals["INFRA_AGENT_SIGNERS"] = "either", filepath.Join(w.Dir, "no-such-file")
 	cfg, err := FromValues(vals, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cfg.CheckFiles(); err == nil {
-		t.Error("ssh mode accepted a missing allowed_signers")
-	}
-	for _, mode := range []string{SigEither, SigSigstore} {
-		vals["INFRA_AGENT_SIGNATURE"] = mode
-		if _, err := FromValues(vals, nil); !isConfigError(err) || !strings.Contains(err.Error(), "SIGSTORE_REPO_ID is required") {
-			t.Fatalf("%s without the IDs: %v", mode, err)
-		}
-	}
-	vals["INFRA_AGENT_SIGSTORE_REPO_ID"], vals["INFRA_AGENT_SIGSTORE_OWNER_ID"] = "1462297697", "165913136"
-	vals["INFRA_AGENT_SIGSTORE_OWNER_ID"] = "abc"
-	if _, err := FromValues(vals, nil); !isConfigError(err) || !strings.Contains(err.Error(), "SIGSTORE_OWNER_ID") {
-		t.Errorf("bad ID: %v", err)
-	}
-	vals["INFRA_AGENT_SIGSTORE_OWNER_ID"] = "165913136"
-	for _, mode := range []string{SigEither} {
-		vals["INFRA_AGENT_SIGNATURE"] = mode
-		if cfg, _ = FromValues(vals, nil); cfg.Signature != mode || cfg.SigstoreRepoID != "1462297697" || cfg.SigstoreOwnerID != "165913136" {
-			t.Fatalf("config %+v", cfg)
-		}
-		if _, err := cfg.CheckFiles(); err == nil {
-			t.Errorf("%s mode accepted a missing allowed_signers", mode)
-		}
-	}
-	vals["INFRA_AGENT_SIGNATURE"] = SigSigstore
-	cfg, err = FromValues(vals, nil)
-	if err != nil {
-		t.Fatal(err)
+	if cfg.SigstoreRepoID != "1462297697" || cfg.SigstoreOwnerID != "165913136" || len(cfg.Warnings) != 2 {
+		t.Fatalf("config %+v", cfg)
 	}
 	id, err := cfg.CheckFiles()
 	if err != nil {
@@ -323,43 +233,47 @@ func TestSigstoreNeedsNoAllowedSigners(t *testing.T) {
 	if o := cycle(t, a); o.Result != ResultVerified {
 		t.Fatalf("%+v", o)
 	}
-	vals["INFRA_AGENT_SIGNATURE"] = "gpg"
-	if _, err := FromValues(vals, nil); !isConfigError(err) || !strings.Contains(err.Error(), "ssh, either or sigstore") {
-		t.Errorf("bad mode: %v", err)
-	}
 }
 
 type nopWriter struct{}
 
 func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 
-// A hub that has not been updated ignores the request for format 2 and answers with three files: either mode then
-// falls back to ssh, sigstore mode rejects the bundle.
-func TestOldHubAnswersWithThreeFiles(t *testing.T) {
-	w := agenttest.NewWorld(t)
-	w.Publish(agenttest.Options{Sigstore: goodSigstore()})
+func archiveOf(t *testing.T, w *agenttest.World, format int) []byte {
+	t.Helper()
 	l, err := bundle.Load(context.Background(), w.MirrorRepo, bundle.DefaultLimits)
 	if err != nil {
 		t.Fatal(err)
 	}
-	plain, err := bundle.Archive(l.Files, timeOf(l), bundle.Format1)
+	plain, err := bundle.Archive(l.Files, timeOf(l), format)
 	if err != nil {
 		t.Fatal(err)
 	}
-	url, pin := fakeHub(t, encryptTo(t, w.AgeID, plain))
-	for sig, want := range map[string]string{SigEither: ResultVerified, SigSigstore: ResultRejected} {
+	return encryptTo(t, w.AgeID, plain)
+}
+
+// A hub of v0.14.0 knows formats up to 2 and answers a request for format 3 as format 2 (four members); the agent
+// accepts that and so also a format 3 answer.
+func TestAgentAcceptsTheAnswersOfOldAndNewHubs(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	w.Publish(agenttest.Options{})
+	for name, format := range map[string]int{"v0.14.0 hub (format 2)": bundle.Format2, "v0.15.0 hub (format 3)": bundle.Format3} {
+		url, pin := fakeHub(t, archiveOf(t, w, format))
 		a, _ := newAgentURLs(t, w, ModeVerify, []string{url}, []string{pin})
-		a.Cfg.Signature = sig
-		a.SigstoreRoot = w.Sigstore.TrustedMaterial()
-		o := cycle(t, a)
-		if o.Result != want {
-			t.Errorf("%s: %+v", sig, o)
+		if o := cycle(t, a); o.Result != ResultVerified {
+			t.Errorf("%s: %+v", name, o)
 		}
 		os.RemoveAll(w.StateDir)
 	}
+	// A hub that answers in format 1 (three files, no Sigstore bundle) gives nothing to verify.
+	url, pin := fakeHub(t, archiveOf(t, w, bundle.Format1))
+	a, _ := newAgentURLs(t, w, ModeVerify, []string{url}, []string{pin})
+	if o := cycle(t, a); o.Result != ResultRejected {
+		t.Errorf("format 1: %+v", o)
+	}
 }
 
-func TestRequestedFormatDependsOnTheMode(t *testing.T) {
+func TestAgentAlwaysRequestsFormat3(t *testing.T) {
 	w := agenttest.NewWorld(t)
 	var mu sync.Mutex
 	var seen []string
@@ -371,20 +285,17 @@ func TestRequestedFormatDependsOnTheMode(t *testing.T) {
 		mu.Unlock()
 		rw.WriteHeader(http.StatusServiceUnavailable)
 	})
-	for _, sig := range []string{SigSSH, SigEither, SigSigstore} {
-		a, _ := newAgentURLs(t, w, ModeVerify, []string{url}, []string{pin})
-		a.Cfg.Signature = sig
-		cycle(t, a)
-	}
-	// ssh mode sends exactly the request the first agents sent; the others ask for format 2.
-	if got := strings.Join(seen, ","); got != ",2,2" {
-		t.Errorf("%s header values %q, want \",2,2\"", FormatHeader, got)
+	a, _ := newAgentURLs(t, w, ModeVerify, []string{url}, []string{pin})
+	a.Cfg.Warnings = []string{"legacy"} // legacy settings change nothing
+	cycle(t, a)
+	if got := strings.Join(seen, ","); got != "3" {
+		t.Errorf("%s header values %q, want \"3\"", FormatHeader, got)
 	}
 }
 
-func TestOpenBundleSigstoreMember(t *testing.T) {
+func TestOpenBundleMembers(t *testing.T) {
 	w := agenttest.NewWorld(t)
-	w.Publish(agenttest.Options{Sigstore: goodSigstore()})
+	w.Publish(agenttest.Options{})
 	l, err := bundle.Load(context.Background(), w.MirrorRepo, bundle.DefaultLimits)
 	if err != nil {
 		t.Fatal(err)
@@ -395,19 +306,31 @@ func TestOpenBundleSigstoreMember(t *testing.T) {
 	open := func(ms ...member) (bundle.Files, error) {
 		return OpenBundle(bytes.NewReader(encryptTo(t, w.AgeID, makeTar(t, ms...))), a.ID)
 	}
-	if f, err := open(st, sg, tb, ss); err != nil || !bytes.Equal(f.Sigstore, l.Files.Sigstore) || !bytes.Equal(f.Statement, l.Files.Statement) {
-		t.Fatalf("four members: %v", err)
+	for name, ms := range map[string][]member{"three members (format 3)": {st, tb, ss}, "four members (format 2)": {st, sg, tb, ss}} {
+		f, err := open(ms...)
+		if err != nil || !bytes.Equal(f.Sigstore, l.Files.Sigstore) || !bytes.Equal(f.Statement, l.Files.Statement) || !bytes.Equal(f.Tarball, l.Files.Tarball) {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if f.Signature != nil {
+			t.Errorf("%s: the legacy signature was kept", name)
+		}
 	}
-	if f, err := open(st, sg, tb); err != nil || f.Sigstore != nil {
-		t.Fatalf("three members: %v", err)
+	if f, err := open(st, sg, tb); err != nil || f.Sigstore != nil { // format 1: opens, then fails verification
+		t.Fatalf("format 1: %v", err)
 	}
 	for name, ms := range map[string][]member{
 		"five members":          {st, sg, tb, ss, ss},
 		"sigstore before":       {st, sg, ss, tb},
-		"wrong fourth name":     {st, sg, tb, {name: "bundle.sigstore", data: ss.data}},
-		"fourth is a symlink":   {st, sg, tb, {name: "bundle.sigstore.json", typ: tar.TypeSymlink}},
-		"fourth is too large":   {st, sg, tb, {name: "bundle.sigstore.json", data: bytes.Repeat([]byte("x"), bundle.MaxSigstore+1)}},
-		"fourth then something": {st, sg, tb, ss, {name: "x", data: []byte("x")}},
+		"sigstore before tar":   {st, ss, tb},
+		"signature twice":       {st, sg, sg, tb, ss},
+		"wrong last name":       {st, tb, {name: "bundle.sigstore", data: ss.data}},
+		"last is a symlink":     {st, tb, {name: "bundle.sigstore.json", typ: tar.TypeSymlink}},
+		"last is too large":     {st, tb, {name: "bundle.sigstore.json", data: bytes.Repeat([]byte("x"), bundle.MaxSigstore+1)}},
+		"signature too large":   {st, {name: "bundle.sig", data: bytes.Repeat([]byte("x"), bundle.MaxSignature+1)}, tb, ss},
+		"last then something":   {st, tb, ss, {name: "x", data: []byte("x")}},
+		"no tarball":            {st, ss},
+		"no statement":          {tb, ss},
+		"something else second": {st, {name: "x", data: []byte("x")}, tb, ss},
 	} {
 		if _, err := open(ms...); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -421,38 +344,30 @@ func TestOpenBundleSigstoreMember(t *testing.T) {
 }
 
 func TestGitHubFallbackReadsTheSigstoreFile(t *testing.T) {
-	for _, sig := range []string{SigSigstore, SigEither} {
-		t.Run(sig, func(t *testing.T) {
-			w := agenttest.NewWorld(t)
-			p := w.Publish(agenttest.Options{OtherKey: true, Sigstore: goodSigstore()})
-			a := githubAgent(t, w, ModeVerify, w.MirrorRepo, agenttest.DeadURL(t))
-			a.Cfg.Signature = sig
-			a.SigstoreRoot = w.Sigstore.TrustedMaterial()
-			o := cycle(t, a)
-			if o.Result != ResultVerified || o.Hub != GitHubSource {
-				t.Fatalf("outcome %+v", o)
-			}
-			if st := mustState(t, w); st.Verified.Commit != p.Commit || st.Verified.Signature != SigSigstore {
-				t.Errorf("state %+v", st.Verified)
-			}
-		})
-	}
-	// Without the file in the tree, sigstore mode rejects what GitHub holds.
 	w := agenttest.NewWorld(t)
-	w.Publish(agenttest.Options{})
+	p := w.Publish(agenttest.Options{NoSSH: true})
 	a := githubAgent(t, w, ModeVerify, w.MirrorRepo, agenttest.DeadURL(t))
-	a.Cfg.Signature = SigSigstore
-	a.SigstoreRoot = w.Sigstore.TrustedMaterial()
-	if o := cycle(t, a); o.Result != ResultRejected || o.Hub != GitHubSource || !strings.Contains(o.Message, "bundle.sigstore.json") {
+	o := cycle(t, a)
+	if o.Result != ResultVerified || o.Hub != GitHubSource {
+		t.Fatalf("outcome %+v", o)
+	}
+	if st := mustState(t, w); st.Verified.Commit != p.Commit || st.Verified.Signature != SigSigstore {
+		t.Errorf("state %+v", st.Verified)
+	}
+	// Without the file in the tree there is nothing to serve (the tree is not a bundle).
+	w2 := agenttest.NewWorld(t)
+	w2.Publish(agenttest.Options{NoSigstore: true})
+	a = githubAgent(t, w2, ModeVerify, w2.MirrorRepo, agenttest.DeadURL(t))
+	if o := cycle(t, a); o.Result == ResultVerified || strings.Contains(o.Message, "verified") {
 		t.Fatalf("outcome %+v", o)
 	}
 }
 
 func TestEmbeddedRootIsUsedWhenNothingIsInjected(t *testing.T) {
 	w := agenttest.NewWorld(t)
-	w.Publish(agenttest.Options{Sigstore: goodSigstore()}) // signed by a throwaway Sigstore: the public-good root rejects it
+	w.Publish(agenttest.Options{}) // signed by a throwaway Sigstore: the public-good root rejects it
 	a, _ := newAgentURLs(t, w, ModeVerify, []string{agenttest.DeadURL(t)}, []string{testPin})
-	a.Cfg.Signature = SigSigstore
+	a.SigstoreRoot = nil
 	l, err := bundle.Load(context.Background(), w.MirrorRepo, bundle.DefaultLimits)
 	if err != nil {
 		t.Fatal(err)
@@ -469,72 +384,9 @@ func TestEmbeddedRootIsUsedWhenNothingIsInjected(t *testing.T) {
 
 func timeOf(l bundle.Loaded) time.Time { return time.Unix(l.Statement.Time, 0) }
 
-func TestEitherModeReportsAFailedSigstoreSignature(t *testing.T) {
-	w := agenttest.NewWorld(t)
-	hub := w.StartHub()
-	w.Publish(agenttest.Options{Sigstore: &sigstoretest.Options{Repo: "Evil/infra"}})
-	o := cycle(t, sigAgent(t, w, SigEither, hub))
-	if o.Result != ResultVerified || !strings.Contains(o.Message, "; sigstore: ") || !strings.Contains(o.Message, "does not verify") || len(o.Message) > MaxMessage {
-		t.Fatalf("outcome %+v", o)
-	}
-	rep, ok := hub.Report(t)
-	if !ok || !strings.Contains(rep.Message, "sigstore: ") {
-		t.Errorf("the hub's report %+v", rep)
-	}
-	// A good Sigstore signature adds nothing.
-	w2 := agenttest.NewWorld(t)
-	hub2 := w2.StartHub()
-	w2.Publish(agenttest.Options{Sigstore: goodSigstore()})
-	a2 := sigAgent(t, w2, SigEither, hub2)
-	if o := cycle(t, a2); strings.Contains(o.Message, "sigstore") {
-		t.Errorf("outcome %+v", o)
-	}
-}
-
-// While the current bundle rests on the ssh signature alone, every report in either mode says so, also the ones of
-// cycles that find nothing new, because the hub's alerts see only the latest report of a host.
-func TestEitherModeMarksEveryReportWhileTheBundleIsSSHOnly(t *testing.T) {
-	w := agenttest.NewWorld(t)
-	hub := w.StartHub()
-	w.Publish(agenttest.Options{Sigstore: &sigstoretest.Options{Repo: "Evil/infra"}})
-	a := sigAgent(t, w, SigEither, hub)
-	o := cycle(t, a)
-	if !strings.Contains(o.Message, "; sigstore: not verified (does not verify") {
-		t.Fatalf("first cycle %+v", o)
-	}
-	for i := 0; i < 2; i++ { // 304s: the reason is the one in the state
-		o = cycle(t, a)
-		if o.Result != ResultUnchanged || !strings.HasSuffix(o.Message, ")") || !strings.Contains(o.Message, "; sigstore: not verified (does not verify") {
-			t.Fatalf("later cycle %d: %+v", i, o)
-		}
-		if rep, ok := hub.Report(t); !ok || !strings.Contains(rep.Message, "sigstore: not verified") {
-			t.Errorf("report %+v", rep)
-		}
-	}
-	// No Sigstore file at all: the marker says so.
-	w2 := agenttest.NewWorld(t)
-	hub2 := w2.StartHub()
-	w2.Publish(agenttest.Options{})
-	o = cycle(t, sigAgent(t, w2, SigEither, hub2))
-	if !strings.Contains(o.Message, "sigstore: not verified (no bundle.sigstore.json") {
-		t.Errorf("no file: %+v", o)
-	}
-	// The next bundle carries a good Sigstore signature: the marker goes away, and the reason is forgotten.
-	w2.Publish(agenttest.Options{Sigstore: goodSigstore()})
-	o = cycle(t, sigAgent(t, w2, SigEither, hub2))
-	if strings.Contains(o.Message, "sigstore") || mustState(t, w2).SigstoreReason != "" {
-		t.Errorf("after: %+v", o)
-	}
-	// ssh and sigstore modes never add it.
-	w3 := agenttest.NewWorld(t)
-	hub3 := w3.StartHub()
-	w3.Publish(agenttest.Options{})
-	if o := cycle(t, sigAgent(t, w3, SigSSH, hub3)); strings.Contains(o.Message, "sigstore") {
-		t.Errorf("ssh mode: %+v", o)
-	}
-}
-
-func TestSigstoreModeDoesNotApplyABundleVerifiedWithSSH(t *testing.T) {
+// The ssh signature that a state may carry is no longer enough to apply: a bundle that an older agent verified with it
+// is not applied until it has been seen with its Sigstore signature.
+func TestABundleVerifiedWithSSHIsNotApplied(t *testing.T) {
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
 	p := w.Publish(agenttest.Options{})
@@ -543,28 +395,24 @@ func TestSigstoreModeDoesNotApplyABundleVerifiedWithSSH(t *testing.T) {
 		t.Fatalf("%+v", o)
 	}
 	runs := len(w.StubRuns())
-	// The host is switched to sigstore mode; the applied bundle was verified with ssh. Not yet due: nothing to do.
-	a.Cfg.Signature = SigSigstore
 	st := mustState(t, w)
+	st.Verified.Signature = SigSSH
+	// Not yet due: nothing to do.
 	if o := a.decide(context.Background(), &st, hub.URL, p.Commit, false); o.Result != ResultUnchanged {
 		t.Fatalf("%+v", o)
 	}
-	// Due again after 24 h: the re-apply is refused, because the record says ssh.
+	// Due again after 24 h: the re-apply is refused, because the record says ssh (a record of an older agent has none).
 	clk.t = clk.t.Add(25 * time.Hour)
-	o := a.decide(context.Background(), &st, hub.URL, p.Commit, false)
-	if o.Result != ResultRejected || !strings.Contains(o.Message, "refusing to apply") || len(w.StubRuns()) != runs {
-		t.Fatalf("%+v, runs %v", o, w.StubRuns())
+	for _, sig := range []string{SigSSH, ""} {
+		st.Verified.Signature = sig
+		o := a.decide(context.Background(), &st, hub.URL, p.Commit, false)
+		if o.Result != ResultRejected || !strings.Contains(o.Message, "refusing to apply") || len(w.StubRuns()) != runs {
+			t.Fatalf("%q: %+v, runs %v", sig, o, w.StubRuns())
+		}
 	}
-	// Seen with its Sigstore signature, the same bundle is applied (a record from an older agent has none: ssh too).
+	// Seen with its Sigstore signature, the same bundle is applied.
 	st.Verified.Signature = SigSigstore
 	if o := a.decide(context.Background(), &st, hub.URL, p.Commit, false); o.Result != ResultOK || len(w.StubRuns()) != runs+1 {
-		t.Fatalf("%+v", o)
-	}
-	// In ssh mode nothing of this applies.
-	st.Verified.Signature = ""
-	a.Cfg.Signature = SigSSH
-	clk.t = clk.t.Add(25 * time.Hour)
-	if o := a.decide(context.Background(), &st, hub.URL, p.Commit, false); o.Result != ResultOK {
 		t.Fatalf("%+v", o)
 	}
 }
@@ -582,7 +430,7 @@ func TestRealCIBundleThroughTheAgent(t *testing.T) {
 	files := bundle.Files{Statement: read("bundle"), Sigstore: read("bundle.sigstore.json")}
 	w := agenttest.NewWorld(t)
 	a, _ := newAgentURLs(t, w, ModeVerify, []string{agenttest.DeadURL(t)}, []string{testPin})
-	a.Cfg.Signature, a.Cfg.SigstoreRepoID, a.Cfg.SigstoreOwnerID = SigSigstore, "1462297697", "165913136"
+	a.SigstoreRoot = nil // the embedded root and the strict policy
 	if sig, err := a.verifyFiles(context.Background(), files); err != nil || sig != SigSigstore {
 		t.Fatalf("%q %v", sig, err)
 	}
@@ -596,8 +444,7 @@ func TestRealCIBundleThroughTheAgent(t *testing.T) {
 	}
 }
 
-// When TUF cannot be reached after a cache existed, the report says that the embedded root was used, and in sigstore
-// mode it says so as a warning.
+// When TUF cannot be reached after a cache existed, the report says that the embedded root was used, and it says so as a warning.
 func TestEmbeddedRootFallbackIsInTheReport(t *testing.T) {
 	read := func(n string) []byte {
 		b, err := os.ReadFile(filepath.Join("..", "sigstorever", "testdata", n))
@@ -607,33 +454,26 @@ func TestEmbeddedRootFallbackIsInTheReport(t *testing.T) {
 		return b
 	}
 	files := bundle.Files{Statement: read("bundle"), Sigstore: read("bundle.sigstore.json")}
-	for _, mode := range []string{SigEither, SigSigstore} {
-		t.Run(mode, func(t *testing.T) {
-			w := agenttest.NewWorld(t)
-			a, _ := newAgentURLs(t, w, ModeVerify, []string{agenttest.DeadURL(t)}, []string{testPin})
-			a.Cfg.Signature, a.Cfg.SigstoreRepoID, a.Cfg.SigstoreOwnerID = mode, "1462297697", "165913136"
-			dir := filepath.Join(w.Dir, "tuf")
-			base := "https://127.0.0.1:1"
-			if err := os.MkdirAll(dir, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			if err := (&tuf.Config{LastTimestamp: time.Now().AddDate(0, 0, -3)}).Persist(filepath.Join(dir, tuf.URLToPath(base)+".json")); err != nil {
-				t.Fatal(err)
-			}
-			a.SigstoreTUF = &sigstorever.Manager{Dir: dir, BaseURL: base}
-			if err := PrepareDir(a.Cfg.StateDir); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := a.verifyFiles(context.Background(), files); err != nil {
-				t.Fatal(err)
-			}
-			want := "sigstore root: embedded fallback (TUF unreachable since "
-			if mode == SigSigstore {
-				want = "WARNING " + want
-			}
-			if !strings.HasPrefix(a.rootNote, want) {
-				t.Errorf("note %q", a.rootNote)
-			}
-		})
+	w := agenttest.NewWorld(t)
+	a, _ := newAgentURLs(t, w, ModeVerify, []string{agenttest.DeadURL(t)}, []string{testPin})
+	a.SigstoreRoot = nil
+	dir := filepath.Join(w.Dir, "tuf")
+	base := "https://127.0.0.1:1"
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&tuf.Config{LastTimestamp: time.Now().AddDate(0, 0, -3)}).Persist(filepath.Join(dir, tuf.URLToPath(base)+".json")); err != nil {
+		t.Fatal(err)
+	}
+	a.SigstoreTUF = &sigstorever.Manager{Dir: dir, BaseURL: base}
+	if err := PrepareDir(a.Cfg.StateDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.verifyFiles(context.Background(), files); err != nil {
+		t.Fatal(err)
+	}
+	want := "WARNING sigstore root: embedded fallback (TUF unreachable since "
+	if !strings.HasPrefix(a.rootNote, want) {
+		t.Errorf("note %q", a.rootNote)
 	}
 }

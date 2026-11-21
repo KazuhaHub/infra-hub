@@ -16,6 +16,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/sigstore/sigstore-go/pkg/root"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -118,7 +119,6 @@ func (c *cli) newRoot() *cobra.Command {
 	pf.String("log-level", "info", "log level: debug, info, warn or error")
 	pf.String("repo", agent.DefaultRepo, "repository the bundle statement must name (for tests)")
 	pf.String("ansible", "ansible-playbook", "ansible-playbook program (for tests)")
-	pf.String("ssh-keygen", "ssh-keygen", "ssh-keygen program (for tests)")
 	pf.String("infra-lock", agent.DefaultInfraLock, "infra-pull's lock file (for tests)")
 	pf.String("infra-applied", agent.DefaultInfraApplied, "infra-pull's applied record (for tests)")
 	for _, n := range hiddenFlags {
@@ -139,7 +139,7 @@ func usageArgs(v cobra.PositionalArgs) cobra.PositionalArgs {
 
 // hiddenFlags are for tests only: they can be set on the command line but never from the environment or agent.env, so
 // nothing a service manager or a file hands over can redirect the agent to another repository or another program.
-var hiddenFlags = []string{"repo", "ansible", "ssh-keygen", "infra-lock", "infra-applied"}
+var hiddenFlags = []string{"repo", "ansible", "infra-lock", "infra-applied"}
 
 // applyEnv fills flags that were not given on the command line from INFRA_AGENT_<NAME>.
 func (c *cli) applyEnv(fs *pflag.FlagSet) error {
@@ -192,6 +192,9 @@ func (c *cli) loadConfig(cmd *cobra.Command) (agent.Config, error) {
 		return cfg, err
 	}
 	cfg.Repo, _ = cmd.Flags().GetString("repo")
+	for _, w := range cfg.Warnings {
+		slog.Warn(w)
+	}
 	return cfg, nil
 }
 
@@ -244,11 +247,11 @@ func (c *cli) newRun() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if cfg.WantsSigstore() {
-				a.SigstoreTUF = sigstoreManager(cfg)
+			a.SigstoreTUF = sigstoreManager(cfg)
+			if sigstoreRoot != nil {
+				a.SigstoreRoot = sigstoreRoot()
 			}
 			a.Ansible, _ = cmd.Flags().GetString("ansible")
-			a.SSHKeygen, _ = cmd.Flags().GetString("ssh-keygen")
 			a.InfraLock, _ = cmd.Flags().GetString("infra-lock")
 			a.InfraApplied, _ = cmd.Flags().GetString("infra-applied")
 			for _, n := range hiddenFlags {
@@ -328,10 +331,8 @@ func (c *cli) newStatus() *cobra.Command {
 				return err
 			}
 			doc := statusDoc{APIVersion: "v1", Host: cfg.Host, Mode: cfg.Mode, State: st}
-			if cfg.WantsSigstore() {
-				if info, err := sigstorever.ReadInfo(cfg.SigstoreInfoPath()); err == nil {
-					doc.SigstoreRoot = &info
-				}
+			if info, err := sigstorever.ReadInfo(cfg.SigstoreInfoPath()); err == nil {
+				doc.SigstoreRoot = &info
 			}
 			if output == "json" {
 				enc := json.NewEncoder(c.stdout)
@@ -344,12 +345,10 @@ func (c *cli) newStatus() *cobra.Command {
 			row("mode", cfg.Mode)
 			row("applied", recordText(st.Applied, "appliedAt"))
 			row("verified", recordText(st.Verified, "verifiedAt"))
-			if cfg.WantsSigstore() {
-				if info, err := sigstorever.ReadInfo(cfg.SigstoreInfoPath()); err == nil {
-					row("sigstore root", rootInfoText(info))
-				} else {
-					row("sigstore root", "")
-				}
+			if info, err := sigstorever.ReadInfo(cfg.SigstoreInfoPath()); err == nil {
+				row("sigstore root", rootInfoText(info))
+			} else {
+				row("sigstore root", "")
 			}
 			row("last result", st.LastResult)
 			row("last message", st.LastMessage)
@@ -392,8 +391,8 @@ func (c *cli) newCheckConfig() *cobra.Command {
 	return &cobra.Command{
 		Use:   "check-config",
 		Short: "Validate agent.env, the token and the key files, and ask each hub for /v1/healthz",
-		Long: "Validates the settings, reads the age key and the allowed_signers file (not needed in signature mode sigstore), prints the\n" +
-			"signature mode and whether the embedded Sigstore trusted root parses, and calls GET /v1/healthz on each hub with the\n" +
+		Long: "Validates the settings, reads the age key, prints the\n" +
+			"Sigstore identity and whether the embedded Sigstore trusted root parses, and calls GET /v1/healthz on each hub with the\n" +
 			"pin, printing what it found. Exit code 0 when the configuration is valid and at least one hub answers, 1 when no hub\n" +
 			"answers, 2 when the configuration is not valid.",
 		Args: usageArgs(cobra.NoArgs),
@@ -407,27 +406,20 @@ func (c *cli) newCheckConfig() *cobra.Command {
 				return err
 			}
 			w := c.stdout
-			fmt.Fprintf(w, "host:      %s\nmode:      %s\ninterval:  %s\nstate dir: %s\nage key:   %s (recipient %s)\nsigners:   %s\npins:      %d\n",
-				cfg.Host, cfg.Mode, cfg.Interval, cfg.StateDir, cfg.AgeKey, strings.Join(id.Recipients(), ","), cfg.Signers, len(cfg.Token.Pins))
-			fmt.Fprintf(w, "signature: %s\n", cfg.Signature)
+			fmt.Fprintf(w, "host:      %s\nmode:      %s\ninterval:  %s\nstate dir: %s\nage key:   %s (recipient %s)\npins:      %d\n",
+				cfg.Host, cfg.Mode, cfg.Interval, cfg.StateDir, cfg.AgeKey, strings.Join(id.Recipients(), ","), len(cfg.Token.Pins))
 			summary, rootErr := sigstorever.RootSummary()
-			switch {
-			case rootErr != nil && cfg.WantsSigstore():
+			if rootErr != nil {
 				return &agent.ConfigError{Err: rootErr}
-			case rootErr != nil:
-				fmt.Fprintf(w, "sigstore:  not used; embedded trusted root does not parse: %v\n", rootErr)
-			case !cfg.WantsSigstore():
-				fmt.Fprintf(w, "sigstore:  not used; embedded trusted root ok (%s)\n", summary)
-			default:
-				fmt.Fprintf(w, "sigstore:  embedded trusted root ok (%s); identity %s, repo ID %s, owner ID %s\n", summary, sigstorever.Identity(cfg.Repo), cfg.SigstoreRepoID, cfg.SigstoreOwnerID)
-				ctx, cancel := context.WithTimeout(cmd.Context(), sigstorever.FetchTimeout+5*time.Second)
-				_, info, err := sigstoreManager(cfg).Root(ctx)
-				cancel()
-				if err != nil {
-					return &agent.ConfigError{Err: err}
-				}
-				fmt.Fprintf(w, "sigstore root: %s\n", rootInfoText(info))
 			}
+			fmt.Fprintf(w, "sigstore:  embedded trusted root ok (%s); identity %s, repo ID %s, owner ID %s\n", summary, sigstorever.Identity(cfg.Repo), cfg.SigstoreRepoID, cfg.SigstoreOwnerID)
+			ctx, cancel := context.WithTimeout(cmd.Context(), sigstorever.FetchTimeout+5*time.Second)
+			_, info, err := sigstoreManager(cfg).Root(ctx)
+			cancel()
+			if err != nil {
+				return &agent.ConfigError{Err: err}
+			}
+			fmt.Fprintf(w, "sigstore root: %s\n", rootInfoText(info))
 			if cfg.GitHubRepo == "" {
 				fmt.Fprintln(w, "github fallback: off")
 			} else {
@@ -465,6 +457,9 @@ func (c *cli) newCheckConfig() *cobra.Command {
 		},
 	}
 }
+
+// sigstoreRoot, when set, is the trusted material that replaces the TUF root (tests only: a throwaway Sigstore).
+var sigstoreRoot func() root.TrustedMaterial
 
 // sigstoreManager is the TUF-backed trusted root of a configuration (a variable so that tests stay off the network).
 var sigstoreManager = func(cfg agent.Config) *sigstorever.Manager { return cfg.SigstoreManager() }

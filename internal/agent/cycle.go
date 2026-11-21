@@ -67,12 +67,10 @@ type Agent struct {
 	// directory; embedded root as the last resort). Nil means the embedded root only; infra-agent sets it in the
 	// signature modes that need it.
 	SigstoreTUF *sigstorever.Manager
-	// sigWarn is a Sigstore signature that failed while the ssh signature was accepted (either mode), for the report.
-	sigWarn string
 	// rootNote is a note about the Sigstore trusted root (the embedded fallback) for the report.
 	rootNote string
-	// SSHKeygen and Ansible are the programs to run (defaults ssh-keygen and ansible-playbook, found through PATH).
-	SSHKeygen, Ansible string
+	// Ansible is the program to run (default ansible-playbook, found through PATH).
+	Ansible string
 	// InfraLock and InfraApplied are infra-pull's lock and applied record; LockTimeout bounds the wait for the lock.
 	InfraLock, InfraApplied string
 	LockTimeout             time.Duration
@@ -90,7 +88,7 @@ type Agent struct {
 
 // New builds an agent from a validated configuration and its age identity.
 func New(cfg Config, id *Identity) (*Agent, error) {
-	a := &Agent{Cfg: cfg, ID: id, SSHKeygen: "ssh-keygen", Ansible: "ansible-playbook", Out: os.Stderr, Now: time.Now,
+	a := &Agent{Cfg: cfg, ID: id, Ansible: "ansible-playbook", Out: os.Stderr, Now: time.Now,
 		InfraLock: DefaultInfraLock, InfraApplied: DefaultInfraApplied, LockTimeout: DefaultLockTimeout}
 	for _, u := range cfg.Token.Hubs {
 		h, err := NewHub(u, cfg.Token.Pins)
@@ -180,7 +178,6 @@ func (a *Agent) Cycle(ctx context.Context) (Outcome, error) {
 		return Outcome{}, err
 	}
 	a.floor = 0
-	a.sigWarn = ""
 	a.rootNote = ""
 	var o Outcome
 	var served *Hub
@@ -207,21 +204,7 @@ func (a *Agent) Cycle(ctx context.Context) (Outcome, error) {
 		slog.Info("interrupted", "host", a.Cfg.Host, "result", o.Result)
 		return o, fmt.Errorf("%w: %v", ErrInterrupted, ctx.Err())
 	}
-	if a.sigWarn != "" {
-		st.SigstoreReason = a.sigWarn
-	}
-	if st.Verified != nil && st.Verified.Signature == SigSigstore {
-		st.SigstoreReason = ""
-	}
-	if cfg := a.Cfg; cfg.Signature == SigEither && st.Verified != nil && st.Verified.Signature != SigSigstore && o.Result != ResultRejected {
-		// Every report says that the current bundle rests on the ssh signature alone, so that the hub's alerts, which see
-		// only the latest report of a host, notice it.
-		reason := st.SigstoreReason
-		if reason == "" {
-			reason = "no Sigstore signature seen"
-		}
-		o.Message += "; sigstore: not verified (" + truncate(reason, 120) + ")"
-	}
+	st.SigstoreReason = "" // written by agents before v0.15.0 only
 	if a.rootNote != "" {
 		o.Message += "; " + a.rootNote
 	}
@@ -256,9 +239,9 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 		if _, err := os.Stat(ReleaseDir(cfg.StateDir, st.Verified.Commit)); err == nil {
 			etag = st.Verified.Commit
 		}
-		// A bundle that was verified with the ssh signature does not satisfy sigstore mode: ask again, so that the hub
-		// sends the Sigstore signature of the same commit.
-		if cfg.Signature == SigSigstore && st.Verified.Signature != SigSigstore {
+		// A bundle that was verified with the ssh signature (by an agent before v0.15.0) does not count: ask again, so that
+		// the hub sends the Sigstore signature of the same commit.
+		if st.Verified.Signature != SigSigstore {
 			etag = ""
 		}
 	}
@@ -269,10 +252,9 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 		rejs      []rejection
 		hubErrs   int
 	)
-	format := bundle.Format1
-	if cfg.WantsSigstore() {
-		format = bundle.Format2
-	}
+	// Format 3 is bundle, bundle.tar.gz and bundle.sigstore.json. A hub of v0.14.0 does not know it and answers as
+	// format 2 (which OpenBundle also reads).
+	format := bundle.Format3
 	for _, hub := range a.Hubs {
 		if ctx.Err() != nil {
 			break
@@ -404,10 +386,9 @@ func (a *Agent) decide(ctx context.Context, st *State, source, target string, ne
 		o.Result, o.Message = ResultUnchanged, fmt.Sprintf("%s is applied", short(target))
 		return o
 	}
-	// In sigstore mode only a bundle whose Sigstore signature was verified is applied, a re-apply included: a bundle that
-	// was verified with the ssh signature, before the mode was switched, waits until it has been seen with its Sigstore
-	// signature.
-	if cfg.Signature == SigSigstore && st.Verified != nil && st.Verified.Commit == target && st.Verified.Signature != SigSigstore {
+	// Only a bundle whose Sigstore signature was verified is applied, a re-apply included: a bundle that an older agent
+	// verified with the ssh signature waits until it has been seen with its Sigstore signature.
+	if st.Verified != nil && st.Verified.Commit == target && st.Verified.Signature != SigSigstore {
 		o.Result, o.Message = ResultRejected, fmt.Sprintf("refusing to apply %s: it was verified with the %s signature, not the Sigstore signature that this host requires", short(target), orSSH(st.Verified.Signature))
 		return o
 	}

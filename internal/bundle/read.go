@@ -34,7 +34,12 @@ func noBundle(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", ErrNoBundle, fmt.Sprintf(format, a...))
 }
 
-// Files are the files as published. Sigstore is the optional bundle.sigstore.json: nil when the branch has none.
+// ErrFormatUnavailable is a request for an archive format that the files on the branch cannot make (formats 1 and 2
+// hold bundle.sig, which the branch no longer has once CI stops signing with the ssh key).
+var ErrFormatUnavailable = errors.New("archive format unavailable")
+
+// Files are the files as published. Signature is the legacy bundle.sig: nil when the branch has none (it is only
+// needed to serve formats 1 and 2).
 type Files struct {
 	Statement, Signature, Tarball, Sigstore []byte
 }
@@ -62,9 +67,10 @@ func Tip(ctx context.Context, repo string) (string, error) {
 	return tip, nil
 }
 
-// Load reads the statement, the signature, the tarball and the optional Sigstore bundle at the tip of main-attestation. Sizes are checked before
-// content is read and the read itself is capped, so an oversized blob is never held in memory. The statement is
-// parsed strictly; the signature and the hash are not checked (the agent does that).
+// Load reads the statement, the tarball and the Sigstore bundle (all required) and the optional legacy signature at the
+// tip of main-attestation. Sizes are checked before content is read and the read itself is capped, so an oversized
+// blob is never held in memory. The statement is parsed strictly; the signatures and the hash are not checked (the
+// agent does that).
 func Load(ctx context.Context, repo string, lim Limits) (Loaded, error) {
 	tip, err := Tip(ctx, repo)
 	if err != nil {
@@ -79,25 +85,25 @@ func LoadAt(ctx context.Context, repo, tip string, lim Limits) (Loaded, error) {
 		return Loaded{}, noBundle("bad tip")
 	}
 	l := Loaded{Tip: tip}
+	sigMax := lim.Sigstore
+	if sigMax == 0 {
+		sigMax = MaxSigstore
+	}
 	for _, f := range []struct {
 		name string
 		max  int64
 		dst  *[]byte
-	}{{StatementName, lim.Statement, &l.Files.Statement}, {SignatureName, lim.Signature, &l.Files.Signature}, {TarballName, lim.Tarball, &l.Files.Tarball}} {
+	}{{StatementName, lim.Statement, &l.Files.Statement}, {TarballName, lim.Tarball, &l.Files.Tarball}, {SigstoreName, sigMax, &l.Files.Sigstore}} {
 		data, err := readBlob(ctx, repo, tip, f.name, f.max)
 		if err != nil {
 			return Loaded{}, err
 		}
 		*f.dst = data
 	}
-	// The fourth file is optional and never makes the bundle unusable: one that is missing, not a blob or over its limit
-	// is left out (a hub serves format 1 from the other three whatever the fourth is).
-	max := lim.Sigstore
-	if max == 0 {
-		max = MaxSigstore
-	}
-	if data, err := readBlob(ctx, repo, tip, SigstoreName, max); err == nil {
-		l.Files.Sigstore = data
+	// The legacy ssh signature is optional and never makes the bundle unusable: one that is missing, not a blob or over
+	// its limit is left out (formats 1 and 2 then cannot be served).
+	if data, err := readBlob(ctx, repo, tip, SignatureName, lim.Signature); err == nil {
+		l.Files.Signature = data
 	}
 	st, err := ParseStatement(l.Files.Statement)
 	if err != nil {
@@ -124,7 +130,7 @@ func LoadStatement(ctx context.Context, repo, tip string, lim Limits) (Statement
 	return st, nil
 }
 
-// Inspect is LoadStatement plus a check that the signature and the tarball exist as files within their limits. It
+// Inspect is LoadStatement plus a check that the tarball and the Sigstore bundle exist as files within their limits. It
 // reads no content of those two.
 func Inspect(ctx context.Context, repo, tip string, lim Limits) (Statement, error) {
 	st, err := LoadStatement(ctx, repo, tip, lim)
@@ -134,12 +140,19 @@ func Inspect(ctx context.Context, repo, tip string, lim Limits) (Statement, erro
 	for _, f := range []struct {
 		name string
 		max  int64
-	}{{SignatureName, lim.Signature}, {TarballName, lim.Tarball}} {
+	}{{TarballName, lim.Tarball}, {SigstoreName, sigstoreMax(lim)}} {
 		if _, err := blobSize(ctx, repo, tip, f.name, f.max); err != nil {
 			return Statement{}, err
 		}
 	}
 	return st, nil
+}
+
+func sigstoreMax(lim Limits) int64 {
+	if lim.Sigstore == 0 {
+		return MaxSigstore
+	}
+	return lim.Sigstore
 }
 
 // blobSize checks that name at tip is a blob of at most max bytes and returns its size.
@@ -211,22 +224,32 @@ func runGit(ctx context.Context, repo string, timeout time.Duration, max, expect
 	return out.buf.Bytes(), nil
 }
 
-// Archive is the uncompressed POSIX ustar the hub encrypts: the files as regular members in the fixed order (bundle,
-// bundle.sig, bundle.tar.gz and, in format 2 when f has one, bundle.sigstore.json), mode 0644, uid and gid 0, mtime the
-// statement time, nothing else. Format 1 is always exactly the three files.
+// Archive is the uncompressed POSIX ustar the hub encrypts: the files as regular members in a fixed order, mode 0644,
+// uid and gid 0, mtime the statement time, nothing else. Format 1 is bundle, bundle.sig, bundle.tar.gz; format 2 adds
+// bundle.sigstore.json; format 3 is bundle, bundle.tar.gz, bundle.sigstore.json. Formats 1 and 2 need bundle.sig and
+// fail with ErrFormatUnavailable without it.
 func Archive(f Files, mtime time.Time, format int) ([]byte, error) {
-	var buf bytes.Buffer
-	tw := tar.NewWriter(&buf)
-	members := []struct {
+	type member struct {
 		name string
 		data []byte
-	}{{StatementName, f.Statement}, {SignatureName, f.Signature}, {TarballName, f.Tarball}}
-	if format >= Format2 && len(f.Sigstore) > 0 {
-		members = append(members, struct {
-			name string
-			data []byte
-		}{SigstoreName, f.Sigstore})
 	}
+	var members []member
+	switch format {
+	case Format1, Format2:
+		if len(f.Signature) == 0 {
+			return nil, fmt.Errorf("%w: format %d holds %s and the branch has none", ErrFormatUnavailable, format, SignatureName)
+		}
+		members = []member{{StatementName, f.Statement}, {SignatureName, f.Signature}, {TarballName, f.Tarball}}
+		if format == Format2 {
+			members = append(members, member{SigstoreName, f.Sigstore})
+		}
+	case Format3:
+		members = []member{{StatementName, f.Statement}, {TarballName, f.Tarball}, {SigstoreName, f.Sigstore}}
+	default:
+		return nil, fmt.Errorf("%w: format %d", ErrFormatUnavailable, format)
+	}
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
 	for _, m := range members {
 		h := &tar.Header{Typeflag: tar.TypeReg, Name: m.name, Mode: 0o644, Size: int64(len(m.data)), ModTime: mtime.UTC(), Format: tar.FormatUSTAR}
 		if err := tw.WriteHeader(h); err != nil {

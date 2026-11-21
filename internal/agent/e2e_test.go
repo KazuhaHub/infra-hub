@@ -46,12 +46,13 @@ func newAgentURLs(t *testing.T, w *agenttest.World, mode string, urls, pins []st
 		}
 	}
 	cfg, err := FromValues(map[string]string{
-		"INFRA_AGENT_TOKEN":     agenttest.Token(t, uniq, urls),
-		"INFRA_AGENT_HOST":      agenttest.Host,
-		"INFRA_AGENT_AGE_KEY":   w.AgeKeyPath,
-		"INFRA_AGENT_SIGNERS":   w.SignersPath,
-		"INFRA_AGENT_MODE":      mode,
-		"INFRA_AGENT_STATE_DIR": w.StateDir,
+		"INFRA_AGENT_TOKEN":             agenttest.Token(t, uniq, urls),
+		"INFRA_AGENT_HOST":              agenttest.Host,
+		"INFRA_AGENT_AGE_KEY":           w.AgeKeyPath,
+		"INFRA_AGENT_SIGSTORE_REPO_ID":  "1462297697",
+		"INFRA_AGENT_SIGSTORE_OWNER_ID": "165913136",
+		"INFRA_AGENT_MODE":              mode,
+		"INFRA_AGENT_STATE_DIR":         w.StateDir,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -65,6 +66,7 @@ func newAgentURLs(t *testing.T, w *agenttest.World, mode string, urls, pins []st
 		t.Fatal(err)
 	}
 	a.Ansible = w.Stub
+	a.SigstoreRoot = w.Sigstore.TrustedMaterial()
 	a.InfraLock = filepath.Join(w.Dir, "infra", "lock")
 	a.InfraApplied = filepath.Join(w.Dir, "infra-applied")
 	a.LockTimeout = 300 * time.Millisecond
@@ -221,10 +223,9 @@ func TestApplyModeAndForwardOnly(t *testing.T) {
 
 func TestRejectedBundles(t *testing.T) {
 	cases := map[string]agenttest.Options{
-		"wrong signature key": {OtherKey: true},
-		"wrong namespace":     {Namespace: "infra-main"},
-		"hash mismatch":       {WrongHash: true},
-		"wrong repo":          {Repo: "Evil/infra"},
+		"wrong signature": {SigstoreOver: []byte("another statement")},
+		"hash mismatch":   {WrongHash: true},
+		"wrong repo":      {Repo: "Evil/infra"},
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -324,16 +325,20 @@ func TestArchiveShapeIsEnforced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, sg, tb := member{name: "bundle", data: l.Files.Statement}, member{name: "bundle.sig", data: l.Files.Signature}, member{name: "bundle.tar.gz", data: l.Files.Tarball}
+	st, sg, tb := member{name: "bundle", data: l.Files.Statement}, member{name: "bundle.sig", data: []byte("legacy")}, member{name: "bundle.tar.gz", data: l.Files.Tarball}
+	ss := member{name: "bundle.sigstore.json", data: l.Files.Sigstore}
 	cases := map[string][]member{
-		"extra member":  {st, sg, tb, {name: "extra", data: []byte("x")}},
-		"wrong order":   {sg, st, tb},
-		"missing":       {st, sg},
-		"renamed":       {st, sg, {name: "bundle.tar", data: l.Files.Tarball}},
-		"nested name":   {st, sg, {name: "./bundle.tar.gz", data: l.Files.Tarball}},
-		"symlink":       {st, sg, {name: "bundle.tar.gz", typ: tar.TypeSymlink}},
-		"directory":     {st, sg, {name: "bundle.tar.gz", typ: tar.TypeDir}},
-		"big statement": {{name: "bundle", data: bytes.Repeat([]byte("x"), bundle.MaxStatement+1)}, sg, tb},
+		"extra member":        {st, tb, ss, {name: "extra", data: []byte("x")}},
+		"wrong order":         {tb, st, ss},
+		"signature after":     {st, tb, sg, ss},
+		"missing tarball":     {st, sg, ss},
+		"missing sigstore":    {st, tb},
+		"missing sigstore v2": {st, sg, tb},
+		"renamed":             {st, {name: "bundle.tar", data: l.Files.Tarball}, ss},
+		"nested name":         {st, {name: "./bundle.tar.gz", data: l.Files.Tarball}, ss},
+		"symlink":             {st, {name: "bundle.tar.gz", typ: tar.TypeSymlink}, ss},
+		"directory":           {st, {name: "bundle.tar.gz", typ: tar.TypeDir}, ss},
+		"big statement":       {{name: "bundle", data: bytes.Repeat([]byte("x"), bundle.MaxStatement+1)}, tb, ss},
 	}
 	for name, ms := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -354,7 +359,7 @@ func TestArchiveShapeIsEnforced(t *testing.T) {
 	// Not for this host's key, and not age at all.
 	other, _ := age.GenerateX25519Identity()
 	for name, body := range map[string][]byte{
-		"other key": encryptTo(t, other, makeTar(t, st, sg, tb)),
+		"other key": encryptTo(t, other, makeTar(t, st, tb, ss)),
 		"not age":   []byte("hello"),
 	} {
 		url, pin := fakeHub(t, body)
@@ -364,17 +369,21 @@ func TestArchiveShapeIsEnforced(t *testing.T) {
 		}
 	}
 	// A truncated age stream is caught when the end is read.
-	good := encryptTo(t, w.AgeID, makeTar(t, st, sg, tb))
+	good := encryptTo(t, w.AgeID, makeTar(t, st, tb, ss))
 	url, pin := fakeHub(t, good[:len(good)-40])
 	a, _ := newAgentURLs(t, w, ModeApply, []string{url}, []string{pin})
 	if o := cycle(t, a); o.Result != ResultRejected {
 		t.Errorf("truncated: %+v", o)
 	}
-	// The intact one is accepted by the same fake hub: the harness itself is sound.
-	url, pin = fakeHub(t, good)
-	a, _ = newAgentURLs(t, w, ModeVerify, []string{url}, []string{pin})
-	if o := cycle(t, a); o.Result != ResultVerified {
-		t.Errorf("intact: %+v", o)
+	// The intact ones are accepted by the same fake hub: the harness itself is sound. Both the three members of format 3
+	// and the four of a v0.14.0 hub (which answers a request for format 3 as format 2) are.
+	for name, ms := range map[string][]member{"format 3": {st, tb, ss}, "format 2": {st, sg, tb, ss}} {
+		url, pin = fakeHub(t, encryptTo(t, w.AgeID, makeTar(t, ms...)))
+		a, _ = newAgentURLs(t, w, ModeVerify, []string{url}, []string{pin})
+		if o := cycle(t, a); o.Result != ResultVerified {
+			t.Errorf("intact, %s: %+v", name, o)
+		}
+		os.RemoveAll(w.StateDir)
 	}
 }
 
@@ -486,7 +495,7 @@ func TestReportFallsBackToAnotherHub(t *testing.T) {
 		// Forward the bundle request to the real hub through a pinned client.
 		h, _ := NewHub(live.URL, []string{live.Pin})
 		var body bytes.Buffer
-		notMod, err := h.Bundle(r.Context(), agenttest.Host, "", 1, func(r io.Reader) error { _, err := io.Copy(&body, r); return err })
+		notMod, err := h.Bundle(r.Context(), agenttest.Host, "", 3, func(r io.Reader) error { _, err := io.Copy(&body, r); return err })
 		if err != nil || notMod {
 			http.Error(rw, "x", 502)
 			return

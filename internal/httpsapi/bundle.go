@@ -21,10 +21,10 @@ import (
 const maxCacheBytes = 256 << 20
 
 // Bundles serves GET /v1/bundle/<host>: the files of the config bundle, read from the mirror's main-attestation
-// branch and age-encrypted to the host. By default the archive holds exactly the three files (what the first agents
-// accept and nothing else); a request with the header X-Infra-Bundle-Format: 2 gets the optional bundle.sigstore.json
-// as a fourth member when the branch has it, and the three files when it has not. The hub does not verify the signature
-// or the hash; the agent does.
+// branch and age-encrypted to the host. By default the archive is format 1 (bundle, bundle.sig, bundle.tar.gz), a
+// request with X-Infra-Bundle-Format: 2 adds bundle.sigstore.json, and format 3 (agents of v0.15.0 and later) is
+// bundle, bundle.tar.gz and bundle.sigstore.json. Formats 1 and 2 need the legacy bundle.sig on the branch; without it
+// they are answered with 406 format_unavailable. The hub does not verify the signature or the hash; the agent does.
 //
 // Only the current tip of main-attestation is ever held. Per tip the hub keeps the parsed statement (so an unchanged
 // poll is a 304 without reading the tarball), the plain ustar archive (built once and shared by all hosts), and the
@@ -153,9 +153,6 @@ func (b *Bundles) serve(ctx context.Context, host string, rcpt age.Recipient, if
 			c.archives = map[int][]byte{}
 		}
 		c.archives[format] = archive
-		if len(l.Files.Sigstore) == 0 { // no fourth file: the two formats are the same bytes
-			c.archives[bundle.Format1], c.archives[bundle.Format2] = archive, archive
-		}
 		b.builds++
 	}
 	var buf bytes.Buffer
@@ -205,7 +202,7 @@ func etagMatches(header, etag string) bool {
 }
 
 // FormatHeader is the request header with which a client asks for an archive format (docs/bundle.md). Without it the
-// answer is format 1. A number above 2 is answered as format 2, the highest this hub knows.
+// answer is format 1. A number above 3 is answered as format 3, the highest this hub knows.
 const FormatHeader = "X-Infra-Bundle-Format"
 
 // requestedFormat reads FormatHeader.
@@ -218,7 +215,7 @@ func requestedFormat(r *http.Request) (int, bool) {
 	if err != nil || n < 1 || len(v) > 3 {
 		return 0, false
 	}
-	return min(n, bundle.Format2), true
+	return min(n, bundle.Format3), true
 }
 
 func (s *Server) bundle(w http.ResponseWriter, r *http.Request, host string) {
@@ -250,7 +247,10 @@ func (s *Server) bundle(w http.ResponseWriter, r *http.Request, host string) {
 	}
 	commit, body, notModified, err := s.Bundles.serve(r.Context(), host, rcpt, r.Header.Get("If-None-Match"), format)
 	if err != nil {
-		if errors.Is(err, bundle.ErrNoBundle) {
+		if errors.Is(err, bundle.ErrFormatUnavailable) {
+			slog.Warn("archive format not available", "host", host, "format", format, "err", err)
+			writeError(w, http.StatusNotAcceptable, "format_unavailable", "this archive format needs bundle.sig, which the hub's bundle no longer has: update infra-agent")
+		} else if errors.Is(err, bundle.ErrNoBundle) {
 			slog.Warn("no bundle to serve", "host", host, "err", err)
 			writeError(w, http.StatusServiceUnavailable, "no_bundle", "the hub has no valid bundle to serve")
 		} else {

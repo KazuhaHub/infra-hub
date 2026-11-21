@@ -90,9 +90,10 @@ func TestGitHubIsNotAskedWhileAHubServes(t *testing.T) {
 
 func TestGitHubBundleIsChecked(t *testing.T) {
 	cases := map[string]agenttest.Options{
-		"wrong signature key": {OtherKey: true},
-		"hash mismatch":       {WrongHash: true},
-		"wrong repo":          {Repo: "Evil/infra"},
+		"wrong signature": {SigstoreOver: []byte("another statement")},
+		"no signature":    {NoSigstore: true},
+		"hash mismatch":   {WrongHash: true},
+		"wrong repo":      {Repo: "Evil/infra"},
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -163,7 +164,7 @@ func TestGitHubFetchFailureIsAppended(t *testing.T) {
 	fileRepos(t)
 	w2 := agenttest.NewWorld(t)
 	hub := w2.StartHub()
-	w2.Publish(agenttest.Options{OtherKey: true})
+	w2.Publish(agenttest.Options{WrongHash: true})
 	b, _ := newAgent(t, w2, ModeApply, hub)
 	b.Cfg.GitHubRepo = filepath.Join(w2.Dir, "no-such-repo")
 	o = cycle(t, b)
@@ -177,7 +178,7 @@ func TestGitHubRejectionKeepsTheHubNotes(t *testing.T) {
 	// The hub serves a bundle that fails the signature check, and so does GitHub.
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()
-	w.Publish(agenttest.Options{OtherKey: true})
+	w.Publish(agenttest.Options{WrongHash: true})
 	a, _ := newAgent(t, w, ModeVerify, hub)
 	a.Cfg.GitHubRepo = w.MirrorRepo // the same bad bundle: still rejected, now as the GitHub one
 	o := cycle(t, a)

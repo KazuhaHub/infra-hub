@@ -29,8 +29,14 @@ func testToken(t *testing.T) string {
 	return tok
 }
 
+const testIDs = "INFRA_AGENT_SIGSTORE_REPO_ID=1462297697\nINFRA_AGENT_SIGSTORE_OWNER_ID=165913136\n"
+
+// writeEnv writes agent.env; the Sigstore IDs, which are required, are added unless the content sets them.
 func writeEnv(t *testing.T, content string) string {
 	t.Helper()
+	if !strings.Contains(content, "SIGSTORE_REPO_ID") {
+		content += testIDs
+	}
 	p := filepath.Join(t.TempDir(), "agent.env")
 	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
@@ -50,11 +56,11 @@ func TestConfigDefaultsAndValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Host != "web1" || c.AgeKey != DefaultAgeKey || c.Signers != DefaultSigners || c.Mode != ModeVerify || c.Interval != 5*time.Minute ||
+	if c.Host != "web1" || c.AgeKey != DefaultAgeKey || c.Mode != ModeVerify || c.Interval != 5*time.Minute ||
 		c.StateDir != DefaultStateDir || c.Repo != DefaultRepo || len(c.Token.Hubs) != 2 || c.Token.Hubs[0] != "https://hub1.example.org:8443" {
 		t.Errorf("%+v", c)
 	}
-	p = writeEnv(t, "INFRA_AGENT_TOKEN="+tok+"\nINFRA_AGENT_HOST=web1\nINFRA_AGENT_MODE=apply\nINFRA_AGENT_INTERVAL=90s\nINFRA_AGENT_STATE_DIR=/srv/ia\nINFRA_AGENT_AGE_KEY=/k\nINFRA_AGENT_SIGNERS=/s\n")
+	p = writeEnv(t, "INFRA_AGENT_TOKEN="+tok+"\nINFRA_AGENT_HOST=web1\nINFRA_AGENT_MODE=apply\nINFRA_AGENT_INTERVAL=90s\nINFRA_AGENT_STATE_DIR=/srv/ia\nINFRA_AGENT_AGE_KEY=/k\nINFRA_AGENT_SIGNERS=/s\nINFRA_AGENT_SIGNATURE=either\n")
 	c, err = LoadConfig(p, func(k string) (string, bool) { // the environment wins
 		if k == "INFRA_AGENT_MODE" {
 			return "verify", true
@@ -64,7 +70,7 @@ func TestConfigDefaultsAndValues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Mode != ModeVerify || c.Interval != 90*time.Second || c.StateDir != "/srv/ia" || c.AgeKey != "/k" || c.Signers != "/s" {
+	if c.Mode != ModeVerify || c.Interval != 90*time.Second || c.StateDir != "/srv/ia" || c.AgeKey != "/k" || len(c.Warnings) != 2 {
 		t.Errorf("%+v", c)
 	}
 }
@@ -122,6 +128,48 @@ func TestCheckGitHubFiles(t *testing.T) {
 	}
 }
 
+func TestConfigSigstoreSettings(t *testing.T) {
+	tok := testToken(t)
+	base := "INFRA_AGENT_TOKEN=" + tok + "\nINFRA_AGENT_HOST=web1\n"
+	for name, c := range map[string]struct{ extra, want string }{
+		"no repo id":    {"INFRA_AGENT_SIGSTORE_OWNER_ID=2\n", "SIGSTORE_REPO_ID is required"},
+		"no owner id":   {"INFRA_AGENT_SIGSTORE_REPO_ID=1\n", "SIGSTORE_OWNER_ID is required"},
+		"neither":       {"", "SIGSTORE_REPO_ID is required"},
+		"bad owner id":  {"INFRA_AGENT_SIGSTORE_REPO_ID=1\nINFRA_AGENT_SIGSTORE_OWNER_ID=abc\n", "SIGSTORE_OWNER_ID"},
+		"unknown value": {testIDs + "INFRA_AGENT_SIGNATURE=gpg\n", "want sigstore"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "agent.env")
+			if err := os.WriteFile(p, []byte(base+c.extra), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := LoadConfig(p, nil)
+			if err == nil || !isConfigError(err) || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("err %v, want %q", err, c.want)
+			}
+		})
+	}
+}
+
+func TestConfigLegacySignatureSettingsWarn(t *testing.T) {
+	tok := testToken(t)
+	base := "INFRA_AGENT_TOKEN=" + tok + "\nINFRA_AGENT_HOST=web1\n"
+	for _, v := range []string{"ssh", "either"} {
+		c, err := LoadConfig(writeEnv(t, base+"INFRA_AGENT_SIGNATURE="+v+"\n"), nil)
+		if err != nil || len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "deprecated") {
+			t.Errorf("%s: %v %v", v, err, c.Warnings)
+		}
+	}
+	c, err := LoadConfig(writeEnv(t, base+"INFRA_AGENT_SIGNATURE=sigstore\n"), nil)
+	if err != nil || len(c.Warnings) != 0 {
+		t.Errorf("sigstore: %v %v", err, c.Warnings)
+	}
+	c, err = LoadConfig(writeEnv(t, base+"INFRA_AGENT_SIGNERS=/etc/infra/allowed_signers\n"), nil)
+	if err != nil || len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], "SIGNERS is ignored") {
+		t.Errorf("signers: %v %v", err, c.Warnings)
+	}
+}
+
 func TestConfigErrors(t *testing.T) {
 	tok := testToken(t)
 	good := "INFRA_AGENT_TOKEN=" + tok + "\nINFRA_AGENT_HOST=web1\n"
@@ -170,7 +218,7 @@ func TestConfigErrors(t *testing.T) {
 
 func TestCheckFiles(t *testing.T) {
 	dir := t.TempDir()
-	c := Config{AgeKey: filepath.Join(dir, "age.key"), Signers: filepath.Join(dir, "signers")}
+	c := Config{AgeKey: filepath.Join(dir, "age.key")}
 	if _, err := c.CheckFiles(); err == nil || !isConfigError(err) {
 		t.Fatalf("missing age key: %v", err)
 	}

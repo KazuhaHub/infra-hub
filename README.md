@@ -18,8 +18,7 @@ This is the code only. Your data (inventory, templates, roles, secrets) stays in
 ## The agent
 
 `infra-agent` runs as root under systemd on each managed host. It fetches the host's config bundle from the hubs over
-HTTPS (trusting only the pinned hub key), decrypts it with the host's age key, verifies the CI signature with
-`ssh-keygen -Y verify`, extracts it safely, applies it with `ansible-playbook` and reports the result. It opens no port.
+HTTPS (trusting only the pinned hub key), decrypts it with the host's age key, verifies the CI's Sigstore keyless signature, extracts it safely, applies it with `ansible-playbook` and reports the result. It opens no port.
 
 ```
 infra-agent run [--once]          run the cycle every INFRA_AGENT_INTERVAL (default 5m), or once
@@ -165,7 +164,7 @@ else changes.
 
 ## Build and test
 
-Requires Go 1.26 or newer. The git tests also need `git` and `ssh-keygen` on the PATH (they are skipped otherwise).
+Requires Go 1.26 or newer. The git tests also need `git` on the PATH (they are skipped otherwise).
 
 ```
 go build ./...
@@ -202,7 +201,7 @@ testdata/            public IP-range fixtures used by the tests
   bundle (encrypted to it), the certificates it owns (encrypted to it) and the public IP lists. Nothing a client sends
   can add a name, a list or an entry.
 - Configuration is trusted because of a signature, not because of where it came from. The configuration repository's CI
-  signs "this commit is on main" (an `ssh-keygen -Y sign` attestation); machines verify it themselves and only move
+  signs "this commit is on main" (a Sigstore keyless signature); machines verify it themselves and only move
   forward. A stale or compromised mirror can delay an update but cannot forge one.
 - Certificate names, owners and IP sources come only from the hub's config, which you render from your own inventory.
 - IP-list updates are validated (reserved ranges, size and address-space limits) and a large change is held until a

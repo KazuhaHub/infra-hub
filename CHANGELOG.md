@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.15.0
+
+### Changed
+
+- The agent verifies the Sigstore keyless signature (`bundle.sigstore.json`) only. The ssh signature (`bundle.sig`, `ssh-keygen -Y verify`
+  against `allowed_signers`) and the `ssh` and `either` signature modes are gone, with the code that ran `ssh-keygen`.
+  `INFRA_AGENT_SIGNATURE` is still accepted (`ssh`, `either` or `sigstore`, so that auto-update does not break a host
+  that is configured with an old value) but the agent always requires Sigstore, and logs a deprecation warning for the other
+  two. `INFRA_AGENT_SIGNERS` is ignored, with a warning. `INFRA_AGENT_SIGSTORE_REPO_ID` and `INFRA_AGENT_SIGSTORE_OWNER_ID` are
+  now always required. `check-config` no longer needs an allowed_signers file; `install.sh` now tells the administrator to set the
+  two IDs instead of copying `allowed_signers`.
+- `bundle.sigstore.json` is required for a servable bundle (without it the hub answers 503 `no_bundle`); `bundle.sig` is
+  optional.
+- Report messages no longer carry `; sigstore: not verified (...)` (that marker existed only in `either` mode).
+
+### Added
+
+- Archive format 3 (`X-Infra-Bundle-Format: 3`): `bundle`, `bundle.tar.gz`, `bundle.sigstore.json`, no ssh signature.
+  v0.15.0 agents request it. Formats 1 and 2 are served as before while `bundle.sig` is on the branch; without it they are
+  answered with 406 `format_unavailable`, so an agent of v0.14.0 or older reports a clear error and is fixed by its next
+  update. A v0.15.0 agent also reads the four members that a v0.14.0 hub sends for a request for format 3 (the old hub
+  clamps it to 2).
+- Rollout order ([bundle.md](bundle.md), "Rollout"): release v0.15.0, wait until every hub and agent runs it, and only then stop
+  publishing `bundle.sig` in CI. v0.15.0 works with today's attestation, which still has `bundle.sig`, and with one that has not.
+
+### Removed
+
+- The `--ssh-keygen` test flag and the ssh-keygen dependency of the agent and of the test suite.
+
 ## v0.14.0
 
 ### Added
