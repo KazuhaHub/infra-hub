@@ -179,6 +179,61 @@ func TestCheckConfig(t *testing.T) {
 	}
 }
 
+func TestCheckConfigSignatureMode(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	envFile := writeEnvFile(t, w, "verify", []string{hub.URL}, []string{hub.Pin})
+	_, out, _ := runAgent(t, nil, "check-config", "--env-file", envFile)
+	if !strings.Contains(out, "signature: ssh\n") || !strings.Contains(out, "sigstore:  not used; trusted root ok (") {
+		t.Errorf("default:\n%s", out)
+	}
+	data, _ := os.ReadFile(envFile)
+	// sigstore mode needs no allowed_signers file.
+	content := strings.Replace(string(data), "INFRA_AGENT_SIGNERS="+w.SignersPath, "INFRA_AGENT_SIGNERS="+filepath.Join(w.Dir, "none"), 1) + "INFRA_AGENT_SIGNATURE=sigstore\n"
+	envFile = filepath.Join(w.Dir, "sigstore.env")
+	if err := os.WriteFile(envFile, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, errs := runAgent(t, nil, "check-config", "--env-file", envFile)
+	if code != 0 || !strings.Contains(out, "signature: sigstore\n") || !strings.Contains(out, "sigstore:  trusted root ok (") ||
+		!strings.Contains(out, "identity https://github.com/KazuhaHub/infra/.github/workflows/attest-main.yml@refs/heads/main") {
+		t.Errorf("sigstore mode: exit %d\n%s\n%s", code, out, errs)
+	}
+	// The same file in ssh mode needs the signers.
+	envFile = filepath.Join(w.Dir, "ssh.env")
+	if err := os.WriteFile(envFile, []byte(strings.Replace(content, "=sigstore", "=ssh", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, _ := runAgent(t, nil, "check-config", "--env-file", envFile); code != 2 {
+		t.Errorf("ssh mode without allowed_signers: exit %d", code)
+	}
+	bad := filepath.Join(w.Dir, "bad.env")
+	if err := os.WriteFile(bad, []byte(strings.Replace(content, "=sigstore", "=gpg", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, _, errs := runAgent(t, nil, "check-config", "--env-file", bad); code != 2 || !strings.Contains(errs, "ssh, either or sigstore") {
+		t.Errorf("bad mode: exit %d %s", code, errs)
+	}
+}
+
+func TestStatusShowsTheSignature(t *testing.T) {
+	w := agenttest.NewWorld(t)
+	hub := w.StartHub()
+	w.Publish(agenttest.Options{})
+	envFile := writeEnvFile(t, w, "apply", []string{hub.URL}, []string{hub.Pin})
+	if code, _, errs := runAgent(t, nil, withLegacy(w, "run", "--once", "--env-file", envFile, "--ansible", w.Stub)...); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	_, out, _ := runAgent(t, nil, "status", "--env-file", envFile)
+	if !strings.Contains(out, ", signature ssh") {
+		t.Errorf("table:\n%s", out)
+	}
+	_, out, _ = runAgent(t, nil, "status", "-o", "json", "--env-file", envFile)
+	if !strings.Contains(out, `"signature": "ssh"`) {
+		t.Errorf("json:\n%s", out)
+	}
+}
+
 func TestCheckConfigGitHubFallback(t *testing.T) {
 	w := agenttest.NewWorld(t)
 	hub := w.StartHub()

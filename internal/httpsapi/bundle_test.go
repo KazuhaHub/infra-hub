@@ -48,7 +48,7 @@ func newAttest(t *testing.T, files map[string]string) *attest {
 
 func (a *attest) commit(files map[string]string) {
 	a.t.Helper()
-	for _, n := range []string{"bundle", "bundle.sig", "bundle.tar.gz"} {
+	for _, n := range []string{"bundle", "bundle.sig", "bundle.tar.gz", "bundle.sigstore.json"} {
 		os.Remove(filepath.Join(a.work, n))
 	}
 	for n, c := range files {
@@ -353,7 +353,7 @@ func TestBundleNotModifiedNeedsNoFullLoad(t *testing.T) {
 	if r := h.getBundle(t, "GET", "h1", map[string]string{"If-None-Match": etag}); r.code != 304 {
 		t.Fatalf("%d", r.code)
 	}
-	if h.s.Bundles.builds != 0 || h.s.Bundles.cur.archive != nil || h.s.Bundles.cachedEncrypted() != 0 {
+	if h.s.Bundles.builds != 0 || len(h.s.Bundles.cur.archives) != 0 || h.s.Bundles.cachedEncrypted() != 0 {
 		t.Error("a 304 built or encrypted something")
 	}
 	// the tarball can no longer be read, but the parsed statement of this tip answers
@@ -382,5 +382,141 @@ func TestBundleBadTimeIsNoBundle(t *testing.T) {
 	a.commit(f)
 	if r := h.getBundle(t, "GET", "h1", nil); r.code != 200 {
 		t.Errorf("largest time: %d", r.code)
+	}
+}
+
+const sigstoreFile = `{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json","fake":true}`
+
+func withSigstore(n int) map[string]string {
+	f := goodFiles(n)
+	f["bundle.sigstore.json"] = sigstoreFile
+	return f
+}
+
+func v2() map[string]string { return map[string]string{FormatHeader: "2"} }
+
+// An agent that does not ask for format 2 (every agent before this one) must keep getting exactly three members, even
+// when the branch carries the fourth file: it rejects any other member count.
+func TestBundleDefaultIsThreeFilesEvenWithTheSigstoreFile(t *testing.T) {
+	h := withBundles(t, newAttest(t, withSigstore(1)))
+	for _, hdr := range []map[string]string{nil, {FormatHeader: "1"}} {
+		r := h.getBundle(t, "GET", "h1", hdr)
+		if r.code != 200 {
+			t.Fatalf("%d %s", r.code, r.body)
+		}
+		names, _, _ := members(t, h.ids["h1"], r.body)
+		if strings.Join(names, ",") != "bundle,bundle.sig,bundle.tar.gz" {
+			t.Errorf("header %v: members %v", hdr, names)
+		}
+		if r.header.Get("Vary") != FormatHeader {
+			t.Errorf("Vary %q", r.header.Get("Vary"))
+		}
+	}
+}
+
+func TestBundleFormat2WithTheFourthFile(t *testing.T) {
+	files := withSigstore(1)
+	h := withBundles(t, newAttest(t, files))
+	r := h.getBundle(t, "GET", "h1", v2())
+	if r.code != 200 {
+		t.Fatalf("%d %s", r.code, r.body)
+	}
+	names, data, hdrs := members(t, h.ids["h1"], r.body)
+	if strings.Join(names, ",") != "bundle,bundle.sig,bundle.tar.gz,bundle.sigstore.json" {
+		t.Fatalf("members %v", names)
+	}
+	for n, want := range files {
+		if string(data[n]) != want {
+			t.Errorf("%s differs", n)
+		}
+	}
+	for _, hd := range hdrs {
+		if hd.Typeflag != tar.TypeReg || hd.Mode != 0o644 || hd.Uid != 0 || hd.Gid != 0 || hd.ModTime.Unix() != 1790000001 || hd.Format != tar.FormatUSTAR {
+			t.Errorf("%s: %+v", hd.Name, hd)
+		}
+	}
+	if r.header.Get("ETag") != `"`+c40(1)+`"` || r.header.Get("Vary") != FormatHeader {
+		t.Errorf("headers %v", r.header)
+	}
+	// A number above 2 is the highest format the hub knows.
+	r5 := h.getBundle(t, "GET", "h1", map[string]string{FormatHeader: "7"})
+	if names, _, _ := members(t, h.ids["h1"], r5.body); len(names) != 4 {
+		t.Errorf("format 7: %v", names)
+	}
+	// 304 does not depend on the format, and says so.
+	r304 := h.getBundle(t, "GET", "h1", map[string]string{FormatHeader: "2", "If-None-Match": `"` + c40(1) + `"`})
+	if r304.code != 304 || r304.header.Get("Vary") != FormatHeader {
+		t.Errorf("304: %d %v", r304.code, r304.header)
+	}
+}
+
+func TestBundleFormat2WithoutTheFourthFileIsThreeFiles(t *testing.T) {
+	h := withBundles(t, newAttest(t, goodFiles(1)))
+	r := h.getBundle(t, "GET", "h1", v2())
+	if r.code != 200 {
+		t.Fatalf("%d %s", r.code, r.body)
+	}
+	names, _, _ := members(t, h.ids["h1"], r.body)
+	if strings.Join(names, ",") != "bundle,bundle.sig,bundle.tar.gz" {
+		t.Fatalf("members %v", names)
+	}
+	// Both formats are the same archive: built once.
+	h.getBundle(t, "GET", "h1", nil)
+	if h.s.Bundles.builds != 1 {
+		t.Errorf("built %d times", h.s.Bundles.builds)
+	}
+}
+
+func TestBundleFormatsAreCachedApart(t *testing.T) {
+	a := newAttest(t, withSigstore(1))
+	h := withBundles(t, a)
+	for i := 0; i < 2; i++ {
+		for _, hdr := range []map[string]string{nil, v2()} {
+			r := h.getBundle(t, "GET", "h1", hdr)
+			names, _, _ := members(t, h.ids["h1"], r.body)
+			want := 3
+			if hdr != nil {
+				want = 4
+			}
+			if len(names) != want {
+				t.Fatalf("round %d, header %v: %v", i, hdr, names)
+			}
+		}
+	}
+	if h.s.Bundles.builds != 2 || h.s.Bundles.cachedEncrypted() != 2 {
+		t.Errorf("builds %d, cached %d", h.s.Bundles.builds, h.s.Bundles.cachedEncrypted())
+	}
+	// The fourth file goes away at the next tip: format 2 follows.
+	a.commit(goodFiles(2))
+	r := h.getBundle(t, "GET", "h1", v2())
+	if names, _, _ := members(t, h.ids["h1"], r.body); len(names) != 3 {
+		t.Errorf("after the fourth file is gone: %v", names)
+	}
+}
+
+func TestBundleBadFormatHeader(t *testing.T) {
+	h := withBundles(t, newAttest(t, withSigstore(1)))
+	for _, v := range []string{"0", "-1", "x", "2.0", "1234"} {
+		r := h.getBundle(t, "GET", "h1", map[string]string{FormatHeader: v})
+		if r.code != 400 || errCodeOf(t, r) != "bad_format" {
+			t.Errorf("%q: %d", v, r.code)
+		}
+	}
+}
+
+// The fourth file never makes the bundle unusable: one over its limit is left out of format 2 and format 1 is untouched.
+func TestBundleOversizedFourthFileIsLeftOut(t *testing.T) {
+	f := withSigstore(1)
+	f["bundle.sigstore.json"] = strings.Repeat("x", 200)
+	h := newHub(t)
+	h.s.Bundles = &Bundles{Repo: newAttest(t, f).repo, Limits: bundle.Limits{Tarball: bundle.MaxTarball, Statement: bundle.MaxStatement, Signature: bundle.MaxSignature, Sigstore: 100}}
+	for _, hdr := range []map[string]string{nil, v2()} {
+		r := h.getBundle(t, "GET", "h1", hdr)
+		if r.code != 200 {
+			t.Fatalf("%d %s", r.code, r.body)
+		}
+		if names, _, _ := members(t, h.ids["h1"], r.body); len(names) != 3 {
+			t.Errorf("header %v: %v", hdr, names)
+		}
 	}
 }

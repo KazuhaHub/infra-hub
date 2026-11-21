@@ -44,8 +44,18 @@ const (
 	ModeApply  = "apply"
 )
 
+// Signature modes (INFRA_AGENT_SIGNATURE): which signature of the statement the agent accepts.
+const (
+	// SigSSH is the ssh signature (bundle.sig against allowed_signers), the default.
+	SigSSH = "ssh"
+	// SigEither accepts a valid Sigstore signature or a valid ssh signature, and prefers Sigstore when the bundle has one.
+	SigEither = "either"
+	// SigSigstore requires the Sigstore signature (bundle.sigstore.json); allowed_signers is not needed.
+	SigSigstore = "sigstore"
+)
+
 // Settings are the keys that agent.env (and the environment) may carry. Anything else with the prefix is an error.
-var settingKeys = []string{"TOKEN", "HOST", "AGE_KEY", "SIGNERS", "MODE", "INTERVAL", "STATE_DIR", "LOG_FORMAT", "LOG_LEVEL", "GITHUB_REPO", "GITHUB_KEY", "GITHUB_KNOWN_HOSTS", "GITHUB_APP_ID", "GITHUB_APP_KEY"}
+var settingKeys = []string{"TOKEN", "HOST", "AGE_KEY", "SIGNERS", "MODE", "SIGNATURE", "INTERVAL", "STATE_DIR", "LOG_FORMAT", "LOG_LEVEL", "GITHUB_REPO", "GITHUB_KEY", "GITHUB_KNOWN_HOSTS", "GITHUB_APP_ID", "GITHUB_APP_KEY"}
 
 // ConfigError is a problem with the configuration: the caller exits with the usage code (2).
 type ConfigError struct{ Err error }
@@ -59,13 +69,15 @@ func configErrorf(format string, a ...any) error {
 
 // Config is the validated configuration.
 type Config struct {
-	Token    jointoken.Token
-	Host     string
-	AgeKey   string
-	Signers  string
-	Mode     string
-	Interval time.Duration
-	StateDir string
+	Token   jointoken.Token
+	Host    string
+	AgeKey  string
+	Signers string
+	Mode    string
+	// Signature is the signature mode: SigSSH, SigEither or SigSigstore.
+	Signature string
+	Interval  time.Duration
+	StateDir  string
 	// Repo is the repository the bundle statement must name.
 	Repo string
 	// GitHubRepo is the git URL of the repository to fall back to when no hub gives a bundle ("" turns the fallback
@@ -157,7 +169,7 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 		}
 		return vals[name]
 	}
-	c := Config{AgeKey: DefaultAgeKey, Signers: DefaultSigners, Mode: ModeVerify, Interval: DefaultInterval, StateDir: DefaultStateDir, Repo: DefaultRepo,
+	c := Config{AgeKey: DefaultAgeKey, Signers: DefaultSigners, Mode: ModeVerify, Signature: SigSSH, Interval: DefaultInterval, StateDir: DefaultStateDir, Repo: DefaultRepo,
 		GitHubKey: DefaultGitHubKey, GitHubKnownHosts: DefaultGitHubKnownHosts, GitHubAppKey: DefaultGitHubAppKey}
 	tok := get("TOKEN")
 	if tok == "" {
@@ -188,6 +200,12 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 			return c, configErrorf("%sMODE %q: want verify or apply", EnvPrefix, v)
 		}
 		c.Mode = v
+	}
+	if v := get("SIGNATURE"); v != "" {
+		if v != SigSSH && v != SigEither && v != SigSigstore {
+			return c, configErrorf("%sSIGNATURE %q: want ssh, either or sigstore", EnvPrefix, v)
+		}
+		c.Signature = v
 	}
 	if v := get("INTERVAL"); v != "" {
 		d, err := time.ParseDuration(v)
@@ -252,11 +270,18 @@ func FromValues(vals map[string]string, environ func(string) (string, bool)) (Co
 	return c, nil
 }
 
-// CheckFiles verifies that the age key and the allowed_signers file can be read, and returns the identity.
+// WantsSigstore reports whether the agent verifies Sigstore signatures (and so asks for archive format 2).
+func (c Config) WantsSigstore() bool { return c.Signature == SigEither || c.Signature == SigSigstore }
+
+// CheckFiles verifies that the age key and, unless the signature mode is sigstore, the allowed_signers file can be
+// read, and returns the identity.
 func (c Config) CheckFiles() (*Identity, error) {
 	id, err := LoadIdentity(c.AgeKey)
 	if err != nil {
 		return nil, &ConfigError{Err: err}
+	}
+	if c.Signature == SigSigstore {
+		return id, nil
 	}
 	st, err := os.Stat(c.Signers)
 	if err != nil {

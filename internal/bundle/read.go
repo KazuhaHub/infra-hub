@@ -16,16 +16,16 @@ import (
 	"github.com/KazuhaHub/infra-hub/internal/gitmirror"
 )
 
-// AttestationRef is the branch the three files are read from.
+// AttestationRef is the branch the files are read from.
 const AttestationRef = "refs/heads/main-attestation"
 
-// Limits bounds the three files; tests inject smaller ones.
+// Limits bounds the files; tests inject smaller ones. A zero Sigstore means MaxSigstore.
 type Limits struct {
-	Tarball, Statement, Signature int64
+	Tarball, Statement, Signature, Sigstore int64
 }
 
 // DefaultLimits are the limits of the contract.
-var DefaultLimits = Limits{Tarball: MaxTarball, Statement: MaxStatement, Signature: MaxSignature}
+var DefaultLimits = Limits{Tarball: MaxTarball, Statement: MaxStatement, Signature: MaxSignature, Sigstore: MaxSigstore}
 
 // ErrNoBundle wraps every reason the hub has no bundle to serve (missing file, over a limit, malformed statement).
 var ErrNoBundle = errors.New("no bundle")
@@ -34,9 +34,9 @@ func noBundle(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", ErrNoBundle, fmt.Sprintf(format, a...))
 }
 
-// Files are the three files as published.
+// Files are the files as published. Sigstore is the optional bundle.sigstore.json: nil when the branch has none.
 type Files struct {
-	Statement, Signature, Tarball []byte
+	Statement, Signature, Tarball, Sigstore []byte
 }
 
 // Loaded is a bundle read from one tip of main-attestation.
@@ -62,7 +62,7 @@ func Tip(ctx context.Context, repo string) (string, error) {
 	return tip, nil
 }
 
-// Load reads the statement, the signature and the tarball at the tip of main-attestation. Sizes are checked before
+// Load reads the statement, the signature, the tarball and the optional Sigstore bundle at the tip of main-attestation. Sizes are checked before
 // content is read and the read itself is capped, so an oversized blob is never held in memory. The statement is
 // parsed strictly; the signature and the hash are not checked (the agent does that).
 func Load(ctx context.Context, repo string, lim Limits) (Loaded, error) {
@@ -89,6 +89,15 @@ func LoadAt(ctx context.Context, repo, tip string, lim Limits) (Loaded, error) {
 			return Loaded{}, err
 		}
 		*f.dst = data
+	}
+	// The fourth file is optional and never makes the bundle unusable: one that is missing, not a blob or over its limit
+	// is left out (a hub serves format 1 from the other three whatever the fourth is).
+	max := lim.Sigstore
+	if max == 0 {
+		max = MaxSigstore
+	}
+	if data, err := readBlob(ctx, repo, tip, SigstoreName, max); err == nil {
+		l.Files.Sigstore = data
 	}
 	st, err := ParseStatement(l.Files.Statement)
 	if err != nil {
@@ -202,15 +211,23 @@ func runGit(ctx context.Context, repo string, timeout time.Duration, max, expect
 	return out.buf.Bytes(), nil
 }
 
-// Archive is the uncompressed POSIX ustar the hub encrypts: exactly the three files as regular members in the fixed
-// order, mode 0644, uid and gid 0, mtime the statement time, nothing else.
-func Archive(f Files, mtime time.Time) ([]byte, error) {
+// Archive is the uncompressed POSIX ustar the hub encrypts: the files as regular members in the fixed order (bundle,
+// bundle.sig, bundle.tar.gz and, in format 2 when f has one, bundle.sigstore.json), mode 0644, uid and gid 0, mtime the
+// statement time, nothing else. Format 1 is always exactly the three files.
+func Archive(f Files, mtime time.Time, format int) ([]byte, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	for _, m := range []struct {
+	members := []struct {
 		name string
 		data []byte
-	}{{StatementName, f.Statement}, {SignatureName, f.Signature}, {TarballName, f.Tarball}} {
+	}{{StatementName, f.Statement}, {SignatureName, f.Signature}, {TarballName, f.Tarball}}
+	if format >= Format2 && len(f.Sigstore) > 0 {
+		members = append(members, struct {
+			name string
+			data []byte
+		}{SigstoreName, f.Sigstore})
+	}
+	for _, m := range members {
 		h := &tar.Header{Typeflag: tar.TypeReg, Name: m.name, Mode: 0o644, Size: int64(len(m.data)), ModTime: mtime.UTC(), Format: tar.FormatUSTAR}
 		if err := tw.WriteHeader(h); err != nil {
 			return nil, noBundle("cannot build the archive: %v", err)

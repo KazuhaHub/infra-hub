@@ -50,6 +50,8 @@ type Record struct {
 	Commit string    `json:"commit"`
 	Time   time.Time `json:"time"` // the statement time
 	At     time.Time `json:"at"`   // when it was applied or verified
+	// Signature is what verified the statement: "ssh" or "sigstore" ("" in a state written by an older agent: ssh).
+	Signature string `json:"signature,omitempty"`
 }
 
 // State is what survives between cycles, in <state dir>/state.json.

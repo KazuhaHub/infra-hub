@@ -17,6 +17,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/sigstore/sigstore-go/pkg/root"
+
 	"github.com/KazuhaHub/infra-hub/internal/bundle"
 	"github.com/KazuhaHub/infra-hub/internal/githubapp"
 )
@@ -57,6 +59,9 @@ type Agent struct {
 	ghMu     sync.Mutex
 	ghSource *githubapp.Source // the GitHub App credential, made on first use
 
+	// SigstoreRoot is the trusted material for Sigstore verification; nil means the root embedded in the binary. Only
+	// tests set it.
+	SigstoreRoot root.TrustedMaterial
 	// SSHKeygen and Ansible are the programs to run (defaults ssh-keygen and ansible-playbook, found through PATH).
 	SSHKeygen, Ansible string
 	// InfraLock and InfraApplied are infra-pull's lock and applied record; LockTimeout bounds the wait for the lock.
@@ -151,7 +156,7 @@ type rejection struct {
 }
 
 func (r rejection) note() string {
-	return fmt.Sprintf("hub %s served a rejected bundle: %s", r.hub.URL, truncate(r.reason, 150))
+	return fmt.Sprintf("hub %s served a rejected bundle: %s", r.hub.URL, truncate(r.reason, 300))
 }
 
 // Cycle runs one fetch, verify, extract, apply and report. The error is for faults of the agent itself (the state
@@ -222,6 +227,11 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 		if _, err := os.Stat(ReleaseDir(cfg.StateDir, st.Verified.Commit)); err == nil {
 			etag = st.Verified.Commit
 		}
+		// A bundle that was verified with the ssh signature does not satisfy sigstore mode: ask again, so that the hub
+		// sends the Sigstore signature of the same commit.
+		if cfg.Signature == SigSigstore && st.Verified.Signature != SigSigstore {
+			etag = ""
+		}
 	}
 	var (
 		served    *Hub
@@ -230,12 +240,16 @@ func (a *Agent) fetchAndApply(ctx context.Context, st *State) (Outcome, *Hub, []
 		rejs      []rejection
 		hubErrs   int
 	)
+	format := bundle.Format1
+	if cfg.WantsSigstore() {
+		format = bundle.Format2
+	}
 	for _, hub := range a.Hubs {
 		if ctx.Err() != nil {
 			break
 		}
 		var status bundleStatus
-		notModified, err := hub.Bundle(ctx, cfg.Host, etag, func(r io.Reader) error {
+		notModified, err := hub.Bundle(ctx, cfg.Host, etag, format, func(r io.Reader) error {
 			var err error
 			_, status, err = a.accept(ctx, st, r)
 			return err
@@ -387,7 +401,7 @@ func (a *Agent) decide(ctx context.Context, st *State, source, target string, ne
 		return o
 	}
 	// The applied record takes the statement time of the verified bundle it applied (target is always that one).
-	rec := Record{Commit: target, Time: st.Verified.Time, At: a.now()}
+	rec := Record{Commit: target, Time: st.Verified.Time, At: a.now(), Signature: st.Verified.Signature}
 	st.Applied = &rec
 	if err := st.Save(cfg.StateDir); err != nil { // before anything else: what was applied must not be forgotten
 		slog.Error("cannot record the applied bundle", "err", err)
@@ -430,7 +444,8 @@ func (a *Agent) accept(ctx context.Context, st *State, body io.Reader) (bundle.S
 // acceptFiles verifies and extracts the three files of a bundle (from a hub, decrypted, or from GitHub) and applies the
 // forward-only rule. The checks are the same for both sources.
 func (a *Agent) acceptFiles(ctx context.Context, st *State, files bundle.Files) (bundle.Statement, bundleStatus, error) {
-	if err := VerifySignature(ctx, a.SSHKeygen, a.Cfg.Signers, a.Cfg.StateDir, files.Statement, files.Signature); err != nil {
+	sig, err := a.verifyFiles(ctx, files)
+	if err != nil {
 		return bundle.Statement{}, 0, local(err)
 	}
 	stmt, err := CheckStatement(files.Statement, a.Cfg.Repo, files.Tarball)
@@ -458,7 +473,9 @@ func (a *Agent) acceptFiles(ctx context.Context, st *State, files bundle.Files) 
 			}
 		}
 		if st.Verified == nil { // the state had only an applied record: the verified one is this bundle
-			st.Verified = &Record{Commit: stmt.Commit, Time: time.Unix(stmt.Time, 0).UTC(), At: a.now()}
+			st.Verified = &Record{Commit: stmt.Commit, Time: time.Unix(stmt.Time, 0).UTC(), At: a.now(), Signature: sig}
+		} else if st.Verified.Commit == stmt.Commit && st.Verified.Signature != sig && (sig == SigSigstore || st.Verified.Signature == "") {
+			st.Verified.Signature = sig // the same bundle, now seen with a signature that counts for more
 		}
 		return stmt, statusSame, nil
 	}
@@ -469,7 +486,7 @@ func (a *Agent) acceptFiles(ctx context.Context, st *State, files bundle.Files) 
 	if _, err := Extract(a.Cfg.StateDir, stmt.Commit, files.Tarball); err != nil {
 		return stmt, 0, local(err)
 	}
-	st.Verified = &Record{Commit: stmt.Commit, Time: time.Unix(stmt.Time, 0).UTC(), At: a.now()}
+	st.Verified = &Record{Commit: stmt.Commit, Time: time.Unix(stmt.Time, 0).UTC(), At: a.now(), Signature: sig}
 	if err := st.Save(a.Cfg.StateDir); err != nil {
 		return stmt, 0, local(fmt.Errorf("write state: %w", err))
 	}

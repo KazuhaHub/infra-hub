@@ -1,4 +1,4 @@
-# Config bundle format v1
+# Config bundle format v1 (archive format 2 adds the Sigstore signature)
 
 The shared contract between the CI of KazuhaHub/infra, infra-hub and infra-agent. The hub implements the delivery side
 (`internal/httpsapi/bundle.go`); the statement parser, the archive writer and the reader of the mirror are in
@@ -20,20 +20,43 @@ reads only them). Three new files:
 - `bundle.sig`: `ssh-keygen -Y sign -n infra-bundle -f <INFRA_ATTEST_KEY> bundle` (same key as the attestation,
   namespace `infra-bundle`, principal `infra-main`). allowed_signers lines carry namespaces="infra-main,infra-bundle".
 
-Limits: bundle.tar.gz at most 64 MiB; statement at most 4 KiB; signature at most 4 KiB.
+- `bundle.sigstore.json` (optional, new in v0.14.0): a Sigstore bundle (protobuf JSON, media type
+  `application/vnd.dev.sigstore.bundle.v0.3+json`) made by `cosign sign-blob --bundle bundle.sigstore.json bundle` in the same
+  workflow run, keyless: the GitHub Actions OIDC token, the public-good Fulcio and Rekor. It signs the statement file
+  `bundle` (the artifact digest is the sha256 of its bytes) and carries the Fulcio certificate and the Rekor entry. The
+  signing identity the agent requires is the certificate's subject alternative name
+  `https://github.com/<owner/name>/.github/workflows/attest-main.yml@refs/heads/main` with OIDC issuer
+  `https://token.actions.githubusercontent.com`; the same name is in the certificate whatever event started the run
+  (push, schedule, workflow_dispatch), because the name is the workflow reference, and the event is a separate extension.
+  Later the ssh signature is dropped and this becomes the only signature; the file is optional until then.
+
+Limits: bundle.tar.gz at most 64 MiB; statement at most 4 KiB; signature at most 4 KiB; bundle.sigstore.json at most
+64 KiB (a real one is about 6 KiB).
 
 ## Hub delivery
 
 `GET /v1/bundle/<host>` on the hub's HTTPS listener (TLS 1.3, pinned identity key).
 - <host> must be a configured client; otherwise 404 `unknown_host` (same JSON error shape as other endpoints).
-- The hub reads the three files from the tip of `main-attestation` in its mirror. Missing or over-limit: 503 `no_bundle`.
+- The hub reads the files from the tip of `main-attestation` in its mirror. A missing or over-limit `bundle`, `bundle.sig`
+  or `bundle.tar.gz`: 503 `no_bundle`. `bundle.sigstore.json` is optional: if it is missing or over its limit, the hub
+  serves as if it did not exist.
   It parses the statement only to get the commit (strict format as above, else 503 `no_bundle`); it does NOT verify the
   signature or the hash (the agent does; the hub is not trusted for integrity).
 - Mirror older than maxStaleSeconds: 503 `stale_mirror` (same rule as the SSH side).
 - Response 200: `Content-Type: application/octet-stream`, `ETag: "<commit>"`, `Cache-Control: no-store`, body = age
-  (binary, not armored) encryption to the host's agePublicKey of an uncompressed POSIX ustar archive with exactly three
-  regular-file members in this order: `bundle`, `bundle.sig`, `bundle.tar.gz` (mode 0644, uid/gid 0, mtime = statement
-  time, no other entries).
+  (binary, not armored) encryption to the host's agePublicKey of an uncompressed POSIX ustar archive (mode 0644, uid/gid 0,
+  mtime = statement time, no other entries) in one of two formats, chosen by the request (below).
+- **Archive format.** By default (no `X-Infra-Bundle-Format` request header, or the value `1`) the archive holds exactly
+  three regular-file members in this order: `bundle`, `bundle.sig`, `bundle.tar.gz`. Agents before v0.14.0 reject any other
+  member count, so a request without the header gets these three even when the branch has `bundle.sigstore.json`.
+  With `X-Infra-Bundle-Format: 2` the archive holds four members in this fixed order: `bundle`, `bundle.sig`,
+  `bundle.tar.gz`, `bundle.sigstore.json`; when the hub has no `bundle.sigstore.json` it answers with the three files (the
+  agent then falls back according to its signature mode, [agent.md](agent.md)). A number above 2 is answered as 2; a value
+  that is not a positive number is 400 `bad_format`. A hub older than v0.14.0 ignores the header and sends the three files.
+  The `ETag` is the commit in both formats and every answer to this endpoint carries `Vary: X-Infra-Bundle-Format`, so a
+  cache keeps the formats apart. (An agent that holds a bundle verified with the ssh signature and now requires Sigstore
+  sends no `If-None-Match`, so it receives the files again instead of a 304.) A header was chosen over a query parameter
+  so that the path, the logs and the 304 logic stay as they were.
 - `If-None-Match: "<commit>"` matching the current commit: 304 with the ETag, no body.
 - Only GET and HEAD are allowed (405 `method_not_allowed` otherwise). Errors use the JSON error shape of
   [conventions.md](conventions.md).
@@ -54,8 +77,9 @@ same lock that guards the cache, so a request can never work from an older tip t
 - The parsed statement of the tip (read once; the signature and the tarball are only checked to exist and to be within
   their limits). An `If-None-Match` for the current commit is answered from it with a 304, without reading or building
   anything else.
-- The plain ustar archive, built once per tip and shared by every host (about the size of `bundle.tar.gz`, up to 64 MiB).
-- The age ciphertext per host, kept while the archive plus all ciphertexts fit in 256 MiB; beyond that older hosts'
+- The plain ustar archive, built once per tip and format and shared by every host (about the size of `bundle.tar.gz`, up
+  to 64 MiB; when there is no `bundle.sigstore.json` the two formats are the same archive and held once).
+- The age ciphertext per host and format, kept while the archive plus all ciphertexts fit in 256 MiB; beyond that older hosts'
   ciphertext is dropped and rebuilt on demand.
 
 Peak memory while a bundle is built is the tarball read from git (<= 64 MiB), the archive (<= 64 MiB) and one
@@ -67,8 +91,10 @@ serialized, so concurrent requests do not multiply this. `infra-hub status` read
 
 ## Agent checks (for the later infra-agent)
 
-Decrypt with /etc/infra/age.key; tar must have exactly those three members; verify bundle.sig over bundle with
-principal infra-main, namespace infra-bundle, against the pinned allowed_signers; parse the statement strictly; repo/ref
+Decrypt with /etc/infra/age.key; tar must have exactly those three members, or those three and `bundle.sigstore.json` as the
+fourth; verify the signature (by the agent's signature mode: bundle.sig over bundle with
+principal infra-main, namespace infra-bundle, against the pinned allowed_signers, and/or bundle.sigstore.json over bundle
+against the embedded Sigstore trusted root and the workflow identity above, with a Rekor entry and a verified time); parse the statement strictly; repo/ref
 match; sha256 and size of bundle.tar.gz match; forward only: the statement time is strictly greater than the newest applied
 or verified one (the bundle has no git history, so a descendant check is not possible; the reasoning is in
 [agent.md](agent.md)); then extract. Implemented by `infra-agent` ([agent.md](agent.md)).

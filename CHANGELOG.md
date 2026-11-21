@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.14.0
+
+### Added
+
+- Sigstore keyless verification of the config bundle. CI may publish `bundle.sigstore.json` (a Sigstore bundle made by
+  `cosign sign-blob --bundle` over the statement `bundle`, GitHub Actions OIDC, public-good Fulcio and Rekor) next to
+  `bundle`, `bundle.sig` and `bundle.tar.gz`; the file is optional and at most 64 KiB.
+- Archive format 2 on `GET /v1/bundle/<host>`: with the request header `X-Infra-Bundle-Format: 2` the archive holds
+  `bundle`, `bundle.sig`, `bundle.tar.gz`, `bundle.sigstore.json` in that order (three files when the hub has no fourth).
+  Without the header the answer is exactly the three files, as before, so agents before this version are unaffected. The
+  ETag is still the commit; responses carry `Vary: X-Infra-Bundle-Format`; a header value that is not a positive number is
+  400 `bad_format`. The GitHub fallback of the agent reads the fourth file from the fetched `main-attestation` tree too.
+- `INFRA_AGENT_SIGNATURE`: `ssh` (default, as before), `either` (a valid Sigstore signature or a valid ssh signature,
+  Sigstore preferred) or `sigstore` (required; `INFRA_AGENT_SIGNERS` and the allowed_signers file are not needed). The
+  agent verifies offline with sigstore-go v1.3.0 against an embedded public-good trusted root
+  (`internal/sigstorever/trusted_root.json`; refresh with `go run ./internal/sigstorever/refresh <file>`): issuer
+  `https://token.actions.githubusercontent.com`, subject alternative name
+  `https://github.com/<repo>/.github/workflows/attest-main.yml@refs/heads/main`, a Rekor entry with a verified timestamp,
+  and a signed digest equal to the sha256 of the statement. All other checks are unchanged.
+- `infra-agent check-config` prints the signature mode and whether the trusted root parses; `infra-agent status` shows
+  which signature verified the applied and the verified bundle (`signature` in the state, in `-o json` too).
+
+### Changed
+
+- The agent binary is about 14 MB larger (the Sigstore verification library); the hub is unchanged in size.
+- A rejection note in a cycle's message keeps 300 characters of the reason instead of 150.
+
 ## v0.13.0
 
 ### Added

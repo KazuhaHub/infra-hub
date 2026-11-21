@@ -21,6 +21,7 @@ import (
 
 	"github.com/KazuhaHub/infra-hub/internal/agent"
 	"github.com/KazuhaHub/infra-hub/internal/logx"
+	"github.com/KazuhaHub/infra-hub/internal/sigstorever"
 	"github.com/KazuhaHub/infra-hub/internal/version"
 )
 
@@ -363,14 +364,19 @@ func recordText(r *agent.Record, atLabel string) string {
 	if r == nil {
 		return ""
 	}
-	return fmt.Sprintf("%s (statement %s, %s %s)", r.Commit, r.Time.UTC().Format(time.RFC3339), atLabel, r.At.UTC().Format(time.RFC3339))
+	text := fmt.Sprintf("%s (statement %s, %s %s)", r.Commit, r.Time.UTC().Format(time.RFC3339), atLabel, r.At.UTC().Format(time.RFC3339))
+	if r.Signature != "" {
+		text += ", signature " + r.Signature
+	}
+	return text
 }
 
 func (c *cli) newCheckConfig() *cobra.Command {
 	return &cobra.Command{
 		Use:   "check-config",
 		Short: "Validate agent.env, the token and the key files, and ask each hub for /v1/healthz",
-		Long: "Validates the settings, reads the age key and the allowed_signers file, and calls GET /v1/healthz on each hub with the\n" +
+		Long: "Validates the settings, reads the age key and the allowed_signers file (not needed in signature mode sigstore), prints the\n" +
+			"signature mode and whether the embedded Sigstore trusted root parses, and calls GET /v1/healthz on each hub with the\n" +
 			"pin, printing what it found. Exit code 0 when the configuration is valid and at least one hub answers, 1 when no hub\n" +
 			"answers, 2 when the configuration is not valid.",
 		Args: usageArgs(cobra.NoArgs),
@@ -386,6 +392,18 @@ func (c *cli) newCheckConfig() *cobra.Command {
 			w := c.stdout
 			fmt.Fprintf(w, "host:      %s\nmode:      %s\ninterval:  %s\nstate dir: %s\nage key:   %s (recipient %s)\nsigners:   %s\npins:      %d\n",
 				cfg.Host, cfg.Mode, cfg.Interval, cfg.StateDir, cfg.AgeKey, strings.Join(id.Recipients(), ","), cfg.Signers, len(cfg.Token.Pins))
+			fmt.Fprintf(w, "signature: %s\n", cfg.Signature)
+			summary, rootErr := sigstorever.RootSummary()
+			switch {
+			case rootErr == nil && cfg.WantsSigstore():
+				fmt.Fprintf(w, "sigstore:  trusted root ok (%s); identity %s\n", summary, sigstorever.Identity(cfg.Repo))
+			case rootErr == nil:
+				fmt.Fprintf(w, "sigstore:  not used; trusted root ok (%s)\n", summary)
+			case cfg.WantsSigstore():
+				return &agent.ConfigError{Err: rootErr}
+			default:
+				fmt.Fprintf(w, "sigstore:  not used; trusted root does not parse: %v\n", rootErr)
+			}
 			if cfg.GitHubRepo == "" {
 				fmt.Fprintln(w, "github fallback: off")
 			} else {

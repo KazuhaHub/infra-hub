@@ -16,6 +16,8 @@ const (
 	MaxTarball   = 64 << 20
 	MaxStatement = 4 << 10
 	MaxSignature = 4 << 10
+	// MaxSigstore bounds the optional bundle.sigstore.json (a Sigstore bundle is about 6 KiB).
+	MaxSigstore = 64 << 10
 )
 
 // Member names, in the order they appear in the archive.
@@ -23,6 +25,16 @@ const (
 	StatementName = "bundle"
 	SignatureName = "bundle.sig"
 	TarballName   = "bundle.tar.gz"
+	// SigstoreName is the optional fourth member, present only in the archive of format 2.
+	SigstoreName = "bundle.sigstore.json"
+)
+
+// Formats of the archive the hub serves.
+const (
+	// Format1 is the three files; the only one the first agents accept.
+	Format1 = 1
+	// Format2 is the three files and, when the hub has it, bundle.sigstore.json as the fourth member.
+	Format2 = 2
 )
 
 // Statement is the content of the `bundle` file.

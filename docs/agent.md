@@ -5,7 +5,7 @@ the hubs over HTTPS, verifies it, applies it with ansible and reports the result
 port. The design follows Beszel: one env file, one token line. The bundle format is in [bundle.md](bundle.md), the hub
 identity key and the pin in [hub-key.md](hub-key.md), the overall design in [design.md](design.md).
 
-This is v1: it covers the bundle path (fetch, verify, extract, apply, report), the install script and the kick (below).
+This is v1 (the Sigstore signature mode is v0.14.0): it covers the bundle path (fetch, verify, extract, apply, report), the install script and the kick (below).
 There is no self-update yet (see "Next steps"); IP lists are not part of it.
 
 ## Configuration
@@ -22,6 +22,7 @@ table, or a key set twice, is an error: the agent exits with code 2 and names th
 | `INFRA_AGENT_AGE_KEY` | `/etc/infra/age.key` | The host's age private key. It decrypts the bundle and the challenge, and is passed to ansible as `SOPS_AGE_KEY_FILE`. |
 | `INFRA_AGENT_SIGNERS` | `/etc/infra/allowed_signers` | The `ssh-keygen` allowed_signers file with the CI key: `infra-main namespaces="infra-main,infra-bundle" ssh-ed25519 AAAA...`. It is the file infra-pull installs on the hosts. |
 | `INFRA_AGENT_MODE` | `verify` | `verify` or `apply` (below). |
+| `INFRA_AGENT_SIGNATURE` | `ssh` | Which signature of the bundle the agent accepts: `ssh`, `either` or `sigstore` ("Signature modes", below). |
 | `INFRA_AGENT_INTERVAL` | `5m` | Time between cycles, at least 10 s. Every wait gets a random difference of up to 10 %. |
 | `INFRA_AGENT_STATE_DIR` | `/var/lib/infra-agent` | State directory (below). |
 | `INFRA_AGENT_GITHUB_REPO` | empty (off) | Git URL of the infra repository, for the GitHub fallback (below), for example `git@github.com:KazuhaHub/infra.git`. |
@@ -73,13 +74,15 @@ that a fleet that starts together does not call the hubs together.
    asks them all, stops at the first newer bundle, and falls back to what it has verified (the answer of the first hub that
    had nothing new) only when every hub has answered. If no hub gives a usable bundle the result is `rejected` (some hub served one that failed a
    check) or `unreachable`.
-2. **Decrypt and check the archive.** age decryption with the host's key. The plain archive must hold exactly `bundle`,
-   `bundle.sig` and `bundle.tar.gz`, in that order, each a regular file within its size limit (4 KiB, 4 KiB, 64 MiB), and
-   nothing else. The age stream is read to its end, so a truncated or altered ciphertext is refused.
-3. **Verify the signature.** `ssh-keygen -Y verify -f <signers> -I infra-main -n infra-bundle -s <sig>` with the statement
+2. **Decrypt and check the archive.** age decryption with the host's key. The plain archive must hold `bundle`,
+   `bundle.sig` and `bundle.tar.gz`, in that order, each a regular file within its size limit (4 KiB, 4 KiB, 64 MiB),
+   then optionally `bundle.sigstore.json` (64 KiB), and nothing else. The age stream is read to its end, so a truncated or
+   altered ciphertext is refused. In `either` and `sigstore` mode the agent asks for archive format 2 (the request header
+   `X-Infra-Bundle-Format: 2`, [bundle.md](bundle.md)); in `ssh` mode it sends exactly the request earlier agents sent.
+3. **Verify the signature**, as the signature mode says (below). For ssh: `ssh-keygen -Y verify -f <signers> -I infra-main -n infra-bundle -s <sig>` with the statement
    on stdin: the tool `infra-pull` already uses, run without a shell, with a 30 s timeout. A verification failure is a
    rejection; an `ssh-keygen` that cannot run or does not finish in 30 s is a fault of the host (result `failed`), not of
-   the bundle.
+   the bundle. For Sigstore: see "Signature modes".
 4. **Check the statement.** Strict parse (`internal/bundle`), then: `repo` is `KazuhaHub/infra`, `ref` is `refs/heads/main`,
    and `sha256` and `size` match `bundle.tar.gz`. Any failure here or in 2 and 3 is result `rejected`: nothing is
    extracted and nothing is applied.
@@ -117,6 +120,56 @@ Results: `ok` (applied), `verified` (verify mode: fetched and verified, nothing 
 older bundle was ignored), `failed` (ansible failed, or a fault of the host), `rejected` (signature, hash or format),
 `unreachable` (no hub gave a bundle). `appliedCommit` in a report is the last commit ansible applied successfully, empty if
 there is none yet.
+
+### Signature modes
+
+`INFRA_AGENT_SIGNATURE` decides what step 3 accepts. Everything else (the statement checks, the tarball hash, forward only,
+extraction) is the same in every mode.
+
+| Mode | Accepts | `allowed_signers` |
+| --- | --- | --- |
+| `ssh` (default) | a valid `bundle.sig`; `bundle.sigstore.json` is ignored | required |
+| `either` | a valid Sigstore signature, or else a valid ssh signature; a Sigstore signature that is present is tried first, and a bad one does not stop a good ssh signature (it is logged) | required |
+| `sigstore` | only a valid Sigstore signature; a bundle without `bundle.sigstore.json` is rejected | not needed (`INFRA_AGENT_SIGNERS` may be absent) |
+
+The Sigstore signature is checked offline with [sigstore-go](https://github.com/sigstore/sigstore-go) against a public-good
+trusted root that is embedded in the binary (`internal/sigstorever/trusted_root.json`). The policy, all of it required:
+
+- the signature over the sha256 of the `bundle` statement bytes verifies with the certificate in the Sigstore bundle, and
+  the certificate chains to a Fulcio certificate authority of the trusted root and was valid at the time of the log entry;
+- the certificate's OIDC issuer is `https://token.actions.githubusercontent.com`;
+- its subject alternative name is exactly `https://github.com/<repo>/.github/workflows/attest-main.yml@refs/heads/main`,
+  where `<repo>` is the repository the agent is configured for (`KazuhaHub/infra`; the statement must name the same one):
+  another repository, another workflow file or another ref (`refs/heads/feature`, a tag) is rejected;
+- at least one Rekor transparency log entry whose inclusion is verified against the trusted root, and a verified timestamp
+  (the log's integrated time, or a signed timestamp of a timestamp authority of the root).
+
+The Fulcio certificate lives ten minutes, so the check relies on that logged time, not on the clock of the host: nothing
+here needs the network, and a host with a wrong clock still verifies. A reject reason says which check failed (for
+example `the Sigstore signature in bundle.sigstore.json does not verify: ... expected SAN value "..." got "..."`);
+`infra-agent status` shows which signature verified the current bundle (`signature ssh` or `signature sigstore`, and
+`signature` in `-o json`), and `check-config` prints the mode and whether the embedded trusted root parses. A trusted root
+that cannot be parsed is a fault of the binary (result `failed`), not a reason to call the bundle bad.
+
+**Migration.** `ssh` to `either` to `sigstore`, one step at a time:
+
+1. Update the hubs and the agents to v0.14.0 or later (the agent works against an older hub, which sends no fourth file).
+   Nothing changes: the mode is still `ssh`.
+2. Make CI publish `bundle.sigstore.json` next to the three files.
+3. Set `INFRA_AGENT_SIGNATURE=either` on the hosts. Bundles with a valid Sigstore signature are recorded as verified by
+   sigstore; `infra-agent status` shows it. A host whose agent cannot verify the Sigstore signature (a stale trusted root,
+   a misnamed workflow) keeps working through ssh, with a warning in the journal.
+4. When every host reports `signature sigstore`, set `INFRA_AGENT_SIGNATURE=sigstore`, then drop `bundle.sig` from CI and
+   the `allowed_signers` file from the hosts. A bundle that was verified with ssh does not count in `sigstore` mode:
+   the agent asks the hub again instead of accepting a 304, and rejects the commit if it has no Sigstore signature.
+
+**Refreshing the trusted root.** The root (Fulcio CAs, Rekor keys, timestamp authorities) rotates a few times a year, and
+the embedded copy only knows what was current when it was built, so a release refreshes it: run
+`go run ./internal/sigstorever/refresh internal/sigstorever/trusted_root.json`, which fetches the root through TUF
+starting from the root of trust that sigstore-go embeds (so every file is verified), then review the diff and release.
+Old entries stay in the root with their validity periods, so bundles signed before a rotation still verify; a bundle
+signed with a key that the embedded root does not know yet is rejected until the agent is updated. Keep agents newer than the
+newest rotation announced by the Sigstore project.
 
 ### Forward only
 

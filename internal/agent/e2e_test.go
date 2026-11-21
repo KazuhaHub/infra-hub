@@ -486,7 +486,7 @@ func TestReportFallsBackToAnotherHub(t *testing.T) {
 		// Forward the bundle request to the real hub through a pinned client.
 		h, _ := NewHub(live.URL, []string{live.Pin})
 		var body bytes.Buffer
-		notMod, err := h.Bundle(r.Context(), agenttest.Host, "", func(r io.Reader) error { _, err := io.Copy(&body, r); return err })
+		notMod, err := h.Bundle(r.Context(), agenttest.Host, "", 1, func(r io.Reader) error { _, err := io.Copy(&body, r); return err })
 		if err != nil || notMod {
 			http.Error(rw, "x", 502)
 			return

@@ -40,6 +40,16 @@ applies and reports the config bundle, see [agent.md](agent.md)); this document 
   `bundle.sig` and `bundle.tar.gz` from the tip of `main-attestation` in the mirror, takes the commit from the
   strictly parsed statement (it verifies neither signature nor hash: the hub is not trusted for integrity), and
   answers an age-encrypted ustar of the three files with `ETag` and `304`, or `503 no_bundle` / `503 stale_mirror`.
+- **Sigstore keyless signature of the bundle (v0.14.0).** CI can sign the statement `bundle` with cosign keyless (GitHub
+  Actions OIDC, the public-good Fulcio and Rekor) and publish `bundle.sigstore.json` next to the ssh signature. Hubs
+  serve it as a fourth archive member only to agents that ask for archive format 2, so older agents keep getting
+  exactly three files. The agent verifies it offline with sigstore-go against an embedded trusted root, pinned to the
+  identity of the `attest-main.yml` workflow of the infra repository on `main`; `INFRA_AGENT_SIGNATURE` (`ssh`,
+  `either`, `sigstore`) selects the accepted signature, so the long-lived CI signing key can be retired in steps. The
+  reasoning: a signing key in CI secrets can be exfiltrated and used elsewhere, while a keyless signature is only
+  issued to a run of that workflow on `main` and is recorded in a public log. The agent binary grows by about 14 MB for
+  the verification library; the hub does not link it (it never verifies). See [agent.md](agent.md) and
+  [bundle.md](bundle.md).
 - **Certificates.** Implemented in phase 3b: the hub obtains the certificate and holds its private key, and
   `GET /v1/cert/<host>/<name>` returns a JSON line (name, fullchain, privkey, not_after), age-encrypted to the owner's `agePublicKey`. Unknown host, unknown name, a name owned by another host and a
   host without an age key all answer the same `404 not_found`; a missing certificate or one with less than 7 days left
